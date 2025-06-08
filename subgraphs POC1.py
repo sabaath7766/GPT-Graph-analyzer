@@ -2,14 +2,13 @@ import pandas as pd
 import numpy as np
 import networkx as nx
 import matplotlib.pyplot as plt
-import matplotlib.patches as patches
 from matplotlib.colors import to_hex, LinearSegmentedColormap
 from itertools import combinations
 import datetime
 import os
 import matplotlib.cm as cm
-import matplotlib.colors as mcolors
 import math
+from typing import Dict, Tuple, List, Set
 
 
 def load_and_prepare_data():
@@ -32,8 +31,9 @@ def compute_correlation_matrix(df):
 
 
 def trim_correlation_matrix(correlation_matrix, alpha=0.1):
-    """Trim the correlation matrix based on dynamic threshold."""
-    # alpha = 0.1  # between 0 & 0.3
+    """Trim the correlation matrix based on dynamic threshold. alpha between 0 & 0.3
+    :rtype: pd.DataFrame
+    """
     cor_max = np.max(correlation_matrix.values)
     cor_mean = np.mean(correlation_matrix.values)
     threshold = (cor_max + cor_mean) / 2 + alpha
@@ -42,7 +42,7 @@ def trim_correlation_matrix(correlation_matrix, alpha=0.1):
     trimmed_matrix = np.where(np.abs(correlation_matrix) > threshold, correlation_matrix, 0)
     print("\nTrimmed Correlation Matrix:\n", trimmed_matrix)
 
-    return trimmed_matrix
+    return pd.DataFrame(trimmed_matrix, index=correlation_matrix.index, columns=correlation_matrix.columns)
 
 
 def construct_graph(trimmed_matrix, nodes):
@@ -108,108 +108,155 @@ def generate_gradient_colors(n=100):
     return [to_hex(cmap(i / (n - 1))) for i in range(n)]
 
 
-def draw_tight_stylized_nodes(ax, pos, labels, node_colors, text_size=10):
+def draw_stylized_nodes(ax, pos, labels, node_colors, text_size=10, padding=0.4):
     """
-    Draws nodes as truly tight, rounded rectangles around the text with a fixed size,
-    ensuring consistent node dimensions across different subplots.
+    Draws nodes by creating text labels with a styled bounding box.
+    This is a robust way to create nodes that fit the text content.
+
+    Args:
+        ax: The Matplotlib axes object.
+        pos: Dictionary of node positions.
+        labels: Dictionary of node labels.
+        node_colors: Dictionary of node colors.
+        text_size: The font size for the node labels.
+        padding: The padding for the bounding box (in points). Adjust for desired fit.
     """
-    text_objs = {}
     for node, (x, y) in pos.items():
         label = labels.get(node, str(node))
-        text_obj = ax.text(x, y, label,
-                           fontsize=text_size,
-                           ha='center', va='center',
-                           color='white',
-                           zorder=4)
-        text_objs[node] = text_obj
+        color = node_colors.get(node, "#cccccc")
 
-    ax.figure.canvas.draw()  # Force rendering to compute text sizes
-    renderer = ax.figure.canvas.get_renderer()
-
-    fig = ax.figure
-    fig_width, fig_height = fig.get_size_inches() * fig.dpi  # Figure size in pixels
-
-    for node, text_obj in text_objs.items():
-        bbox = text_obj.get_window_extent(renderer=renderer)
-
-        # Convert bbox to figure-relative coordinates (0 to 1 range)
-        width = bbox.width / fig_width
-        height = bbox.height / fig_height
-
-        # Convert figure-relative coords to axis data coords
-        inv = ax.transAxes.inverted()
-        width_data, height_data = inv.transform((width, height)) - inv.transform((0, 0))
-
-        # Get center position
-        x_center, y_center = pos[node]
-
-        padded_width = width * 2.4
-
-        # Draw rectangle with fixed proportions
-        x_left = x_center - padded_width / 2
-        rect = patches.FancyBboxPatch(
-            (x_left, y_center - height / 2),
-            padded_width, height,
-            boxstyle="round, pad=0.03",
-            facecolor=node_colors.get(node, "#cccccc"),
-            edgecolor="#222222",
-            linewidth=1,
-            zorder=3
-        )
-        ax.add_patch(rect)
+        ax.text(x, y, label,
+                fontsize=text_size,
+                ha='center',
+                va='center',
+                color='white',
+                zorder=4,  # Ensure text is on top of the box
+                bbox=dict(
+                    boxstyle=f"round,pad={padding}",  # The style of the box
+                    facecolor=color,
+                    edgecolor="#222222",
+                    linewidth=1,
+                    zorder=3  # Ensure box is behind the text
+                ))
 
 
-def visualize_main_graph(G, output_dir):
-    """Visualize and save the main graph with a consistent gradient color scheme."""
-    # Remove isolated nodes
+def bridge_layout(G, spacing=40, subgraph_scale=2.5, repulsion_strength=200.0, repulsion_radius=100.0, iterations=1000):
+    """
+    DEPRECATED
+    Calculates a layout for G with bridges removed and subgraphs spaced out,
+    using circular layout and repulsion forces.
+    """
+    bridges = list(nx.bridges(G))
+    articulation_points = set(nx.articulation_points(G))
+
+    G_copy = G.copy()
+    G_copy.remove_edges_from(bridges)
+    subgraphs = list(nx.connected_components(G_copy))
+
+    pos = {}
+    offset_x = 0
+
+    for component in subgraphs:
+        subgraph = G.subgraph(component).copy()
+
+        for u, v, d in subgraph.edges(data=True):
+            if 'weight' in d:
+                d['weight'] = abs(d['weight'])
+
+        num_nodes = len(subgraph)
+        radius = subgraph_scale * 10
+        center_x = offset_x + radius
+        center_y = 0
+
+        sub_layout = {}
+        angle_step = 2 * math.pi / max(num_nodes, 1)
+
+        for i, node in enumerate(subgraph.nodes()):
+            angle = i * angle_step
+            sub_layout[node] = (
+                center_x + radius * math.cos(angle),
+                center_y + radius * math.sin(angle)
+            )
+
+        # Scale
+        for node, (x, y) in sub_layout.items():
+            sub_layout[node] = (x * subgraph_scale, y * subgraph_scale)
+
+        # Shift to the right
+        min_x_scaled = min(x for x, y in sub_layout.values())
+        max_x_scaled = max(x for x, y in sub_layout.values())
+        shift_x = offset_x - min_x_scaled + spacing
+        for node, (x, y) in sub_layout.items():
+            sub_layout[node] = (x + shift_x, y)
+
+        offset_x = max_x_scaled + shift_x
+        pos.update(sub_layout)
+
+    # Place articulation points near their neighbors
+    for ap in articulation_points:
+        if ap in G.nodes and ap in pos:
+            neighbor_positions = [pos[n] for n in G.neighbors(ap) if n in pos]
+            if neighbor_positions:
+                avg_x = np.mean([p[0] for p in neighbor_positions])
+                avg_y = np.mean([p[1] for p in neighbor_positions])
+                pos[ap] = (avg_x, avg_y)
+
+    # Apply repulsion
+    for _ in range(iterations):
+        new_pos = pos.copy()
+        for node1, pos1 in pos.items():
+            for node2, pos2 in pos.items():
+                if node1 != node2:
+                    dist = np.linalg.norm(np.array(pos1) - np.array(pos2))
+                    if repulsion_radius > dist > 1e-6:
+                        direction = np.array(pos1) - np.array(pos2)
+                        direction = direction / np.linalg.norm(direction)
+                        force = repulsion_strength / dist
+                        shift = direction * force * 0.01
+                        new_pos[node1] = tuple(np.array(new_pos[node1]) + shift)
+                        new_pos[node2] = tuple(np.array(new_pos[node2]) - shift)
+        pos = new_pos
+
+    return pos
+
+
+def visualize_main_graph_old(G, output_dir, node_size=800, font_size=10, edge_width=1.5, edge_alpha=0.6):
+    """
+    DEPRECATED
+    Visualizes the main graph using the provided layout positions.
+    """
     G_filtered = G.edge_subgraph(G.edges()).copy()
 
-    plt.figure(figsize=(12, 8))
+    plt.figure(figsize=(16, 10))
 
-    # Circular layout with adjusted scaling
-    pos = nx.spring_layout(G_filtered, k=80, iterations=20)
-    # pos = {node: (x * 0.6, y * 0.6) for node, (x, y) in pos.items()}  # Reduce spread
+    pos = bridge_layout(G_filtered)
 
-    # Assign colors using the gradient
-    nodes = list(G_filtered.nodes())
-    num_nodes = len(G_filtered.nodes())
-    GRADIENT_COLORS = generate_gradient_colors(num_nodes)
-    node_colors = {node: GRADIENT_COLORS[i % num_nodes] for i, node in enumerate(nodes)}
+    # Draw nodes
+    # nx.draw_networkx_nodes(G_filtered, pos, node_size=node_size, node_color='skyblue')
 
-    # # Get absolute correlation values
-    # weights = [abs(G_filtered[u][v]['weight']) for u, v in G_filtered.edges()]
-    #
-    # # Normalize edge thickness (scale between 1 and 5)
-    # min_w, max_w = min(weights), max(weights)
-    # edge_widths = [(w - min_w) / (max_w - min_w) * 4 + 1 for w in weights]  # Scale from 1 to 5
+    # Assign a unique color to each subgraph
+    num_subgraphs = len(list(nx.connected_components(G_filtered)))
+    color_map = cm.get_cmap("tab10", num_subgraphs)
 
-    # Draw edges with thickness
-    nx.draw_networkx_edges(G_filtered, pos, edge_color="gray", alpha=0.8, width=0.7)
+    node_colors = {}
+    for i, component in enumerate(nx.connected_components(G_filtered)):
+        color = to_hex(color_map(i))
+        for node in component:
+            node_colors[node] = color
 
-    # Draw tight, rounded nodes
-    labels = {node: str(node) for node in G_filtered.nodes()}
-    ax = plt.gca()
-    draw_tight_stylized_nodes(ax, pos, labels, node_colors)
+    # Draw nodes with assigned colors
+    node_colors_list = [node_colors[node] for node in G_filtered.nodes()]
+    nx.draw_networkx_nodes(G_filtered, pos, node_size=node_size, node_color=node_colors_list)
 
-    # Edge labels
+    # Draw edges
+    nx.draw_networkx_edges(G_filtered, pos, width=edge_width, alpha=edge_alpha, edge_color='gray')
+
+    # Draw node labels
+    nx.draw_networkx_labels(G_filtered, pos, font_size=font_size, font_color='black')
+
+    # Draw edge labels
     edge_labels = {(u, v): f"{G_filtered[u][v]['weight']:.2f}" for u, v in G_filtered.edges()}
-    for (u, v), label in edge_labels.items():
-        x1, y1 = pos[u]
-        x2, y2 = pos[v]
-
-        # Compute edge vector and normalize
-        dx, dy = x2 - x1, y2 - y1
-        length = (dx ** 2 + dy ** 2) ** 0.5
-        if length > 0:
-            dx, dy = dx / length, dy / length  # Normalize direction
-
-        # Shift label along edge direction
-        label_offset_factor = 0.03
-        x_mid = (x1 + x2) / 2 + label_offset_factor * dx
-        y_mid = (y1 + y2) / 2 + label_offset_factor * dy
-
-        ax.text(x_mid, y_mid, label, fontsize=8, ha="center", va="center",
-                bbox=dict(facecolor="white", edgecolor="none", boxstyle="round,pad=0"))
+    nx.draw_networkx_edge_labels(G_filtered, pos, edge_labels=edge_labels, font_size=font_size - 2)
 
     plt.axis("off")
     filename = os.path.join(output_dir, "main_graph.svg")
@@ -217,130 +264,176 @@ def visualize_main_graph(G, output_dir):
     print(f"Main graph visualization saved as '{filename}'.")
 
 
-# def bridge_layout(G, spacing=40, subgraph_scale=2.5, repulsion_strength=200.0, repulsion_radius=100.0, iterations=1000):
-#     """
-#     Calculates the bridge layout with a repulsion force to push nodes apart.
-#     """
-#     bridges = list(nx.bridges(G))
-#     articulation_points = set(nx.articulation_points(G))
-#
-#     G_copy = G.copy()
-#     G_copy.remove_edges_from(bridges)
-#
-#     subgraphs = list(nx.connected_components(G_copy))
-#
-#     pos = {}
-#     offset_x = 0
-#
-#     for component in subgraphs:
-#         subgraph = G.subgraph(component).copy()
-#
-#         for u, v, d in subgraph.edges(data=True):
-#             if 'weight' in d:
-#                 d['weight'] = abs(d['weight'])
-#
-#         num_nodes = len(subgraph)
-#         radius = subgraph_scale * 10  # Ensures spacing
-#         center_x = offset_x + radius  # Moves each subgraph right
-#         center_y = 0  # Keep aligned
-#
-#         sub_layout = {}
-#         angle_step = 2 * math.pi / max(num_nodes, 1)  # Avoid division by zero
-#
-#         for i, node in enumerate(subgraph.nodes()):
-#             angle = i * angle_step  # Positioning around the circle
-#             sub_layout[node] = (
-#                 center_x + radius * math.cos(angle),
-#                 center_y + radius * math.sin(angle)
-#             )
-#
-#         offset_x += 2 * radius + spacing  # Move right for the next subgraph
-#
-#         for node, (x, y) in sub_layout.items():
-#             sub_layout[node] = (x * subgraph_scale, y * subgraph_scale)
-#
-#         min_x_scaled = min(x for x, y in sub_layout.values())
-#         max_x_scaled = max(x for x, y in sub_layout.values())
-#
-#         shift_x = offset_x - min_x_scaled + spacing
-#         for node, (x, y) in sub_layout.items():
-#             sub_layout[node] = (x + shift_x, y)
-#
-#         offset_x = max_x_scaled + shift_x
-#
-#         pos.update(sub_layout)
-#
-#     for ap in articulation_points:
-#         if ap in G.nodes and ap in pos and ap in articulation_points:
-#             neighbor_positions = [pos[n] for n in G.neighbors(ap) if n in pos]
-#             if neighbor_positions:
-#                 avg_x = np.mean([p[0] for p in neighbor_positions])
-#                 avg_y = np.mean([p[1] for p in neighbor_positions])
-#                 pos[ap] = (avg_x, avg_y)
-#
-#     # Apply repulsion force
-#     for _ in range(iterations):
-#         for node1, pos1 in pos.items():
-#             for node2, pos2 in pos.items():
-#                 if node1 != node2:
-#                     dist = np.linalg.norm(np.array(pos1) - np.array(pos2))
-#                     if dist < repulsion_radius:
-#                         force = repulsion_strength / (dist + 1e-6)  # Avoid division by zero
-#                         direction = np.array(pos1) - np.array(pos2)
-#                         if np.linalg.norm(direction) > 0:
-#                             direction = direction / np.linalg.norm(direction)
-#                             pos[node1] = tuple(np.array(pos1) + direction * force * 0.01)
-#                             pos[node2] = tuple(np.array(pos2) - direction * force * 0.01)
-#
-#     return pos
-#
-#
-# def visualize_main_graph(G, output_dir, node_size=800, font_size=10, edge_width=1.5, edge_alpha=0.6):
-#     """
-#     Visualizes the main graph using the provided layout positions.
-#     """
-#     G_filtered = G.edge_subgraph(G.edges()).copy()
-#
-#     plt.figure(figsize=(16, 10))
-#
-#     pos = bridge_layout(G_filtered)
-#
-#     # Draw nodes
-#     # nx.draw_networkx_nodes(G_filtered, pos, node_size=node_size, node_color='skyblue')
-#
-#     # Assign a unique color to each subgraph
-#     num_subgraphs = len(list(nx.connected_components(G_filtered)))
-#     color_map = cm.get_cmap("tab10", num_subgraphs)
-#
-#     node_colors = {}
-#     for i, component in enumerate(nx.connected_components(G_filtered)):
-#         color = mcolors.to_hex(color_map(i))
-#         for node in component:
-#             node_colors[node] = color
-#
-#     # Draw nodes with assigned colors
-#     node_colors_list = [node_colors[node] for node in G_filtered.nodes()]
-#     nx.draw_networkx_nodes(G_filtered, pos, node_size=node_size, node_color=node_colors_list)
-#
-#     # Draw edges
-#     nx.draw_networkx_edges(G_filtered, pos, width=edge_width, alpha=edge_alpha, edge_color='gray')
-#
-#     # Draw node labels
-#     nx.draw_networkx_labels(G_filtered, pos, font_size=font_size, font_color='black')
-#
-#     # Draw edge labels
-#     edge_labels = {(u, v): f"{G_filtered[u][v]['weight']:.2f}" for u, v in G_filtered.edges()}
-#     nx.draw_networkx_edge_labels(G_filtered, pos, edge_labels=edge_labels, font_size=font_size - 2)
-#
-#     plt.axis("off")
-#     filename = os.path.join(output_dir, "main_graph.svg")
-#     plt.savefig(filename, format="svg")
-#     print(f"Main graph visualization saved as '{filename}'.")
-
-
-def visualize_claw_subgraphs_lr(G, claws, output_dir):
+def improved_bridge_layout(
+        G: nx.Graph,
+        spacing: float = 5.0,
+        component_layout_func=nx.spring_layout,
+        **layout_kwargs
+) -> Dict[str, Tuple[float, float]]:
     """
-    Visualizes claw subgraphs in a left-right layout:
+    Calculates a visually separated layout for a single connected graph component with bridges.
+    """
+    bridges = list(nx.bridges(G))
+    G_decomposed = G.copy()
+    G_decomposed.remove_edges_from(bridges)
+    components: List[Set[str]] = list(nx.connected_components(G_decomposed))
+    component_layouts = []
+    for component_nodes in components:
+        subgraph = G.subgraph(component_nodes)
+        pos_subgraph = component_layout_func(subgraph, **layout_kwargs)
+        component_layouts.append(pos_subgraph)
+
+    final_pos = {}
+    current_offset_x = 0.0
+    for pos_subgraph in component_layouts:
+        if not pos_subgraph:
+            continue
+        min_x = min(pos[0] for pos in pos_subgraph.values())
+        max_x = max(pos[0] for pos in pos_subgraph.values())
+        shift_x = current_offset_x - min_x + spacing
+        for node, pos in pos_subgraph.items():
+            final_pos[node] = (pos[0] + shift_x, pos[1])
+        current_offset_x += (max_x - min_x) + spacing
+
+    articulation_points = set(nx.articulation_points(G))
+    for ap in articulation_points:
+        neighbor_positions = [final_pos[n] for n in G.neighbors(ap) if n in final_pos]
+        if neighbor_positions:
+            avg_x = np.mean([p[0] for p in neighbor_positions])
+            avg_y = np.mean([p[1] for p in neighbor_positions])
+            final_pos[ap] = (avg_x, avg_y)
+    return final_pos
+
+
+def create_hierarchical_layout(
+        G: nx.Graph,
+        grid_spacing: float = 10.0,
+        **layout_kwargs
+) -> Dict[str, Tuple[float, float]]:
+    """
+    Creates a hierarchical layout by first filtering isolates, then applying
+    the 'improved_bridge_layout' to each component and arranging them in a grid.
+
+    Args:
+        G: The input NetworkX graph.
+        grid_spacing: The space to maintain between components in the final grid.
+        **layout_kwargs: Keyword arguments to pass to the internal layout functions
+                         (e.g., seed, iterations, k).
+
+    Returns:
+        A dictionary of node positions.
+    """
+    # 1. PRE-PROCESSING: Filter out all isolated nodes (nodes with no edges)
+    G_filtered = G.copy()
+    isolates = [node for node, degree in G.degree() if degree == 0]
+    G_filtered.remove_nodes_from(isolates)
+
+    # 2. Find all remaining connected components
+    components = list(nx.connected_components(G_filtered))
+    if not components:
+        return {}
+
+    # 3. Calculate the layout for each component using the bridge_layout
+    component_layouts = []
+    component_bboxes = []
+    for component_nodes in components:
+        subgraph = G_filtered.subgraph(component_nodes)
+
+        # Apply the bridge layout to each component
+        pos_subgraph = improved_bridge_layout(subgraph, **layout_kwargs)
+
+        component_layouts.append(pos_subgraph)
+
+        if pos_subgraph:
+            min_x = min(pos[0] for pos in pos_subgraph.values())
+            max_x = max(pos[0] for pos in pos_subgraph.values())
+            min_y = min(pos[1] for pos in pos_subgraph.values())
+            max_y = max(pos[1] for pos in pos_subgraph.values())
+            component_bboxes.append((min_x, max_x, min_y, max_y))
+        else:
+            component_bboxes.append((0, 0, 0, 0))
+
+    # 4. Arrange the fully rendered components in a grid
+    max_width = max((bbox[1] - bbox[0] for bbox in component_bboxes), default=0)
+    max_height = max((bbox[3] - bbox[2] for bbox in component_bboxes), default=0)
+    cell_width = max_width + grid_spacing
+    cell_height = max_height + grid_spacing
+
+    num_components = len(components)
+    cols = int(math.ceil(math.sqrt(num_components)))
+
+    final_pos = {}
+    for i, (pos_subgraph, bbox) in enumerate(zip(component_layouts, component_bboxes)):
+        if not pos_subgraph:
+            continue
+        row, col = i // cols, i % cols
+        target_center_x = col * cell_width
+        target_center_y = -row * cell_height
+        original_center_x = (bbox[0] + bbox[1]) / 2
+        original_center_y = (bbox[2] + bbox[3]) / 2
+        shift_x = target_center_x - original_center_x
+        shift_y = target_center_y - original_center_y
+        for node, pos in pos_subgraph.items():
+            final_pos[node] = (pos[0] + shift_x, pos[1] + shift_y)
+
+    return final_pos
+
+
+def visualize_main_graph(G, output_dir):
+    """Visualize and save the graph using the hierarchical layout."""
+
+    if not G.nodes():
+        print("Graph is empty. Skipping visualization.")
+        return
+
+    plt.figure(figsize=(20, 16))
+    ax = plt.gca()
+
+    # seed for reproducibility of the internal spring layouts
+    pos = create_hierarchical_layout(G, grid_spacing=0, seed=42, k=8)
+
+    if not pos:
+        print("Layout is empty after filtering isolates. Nothing to visualize.")
+        plt.close()
+        return
+
+    G_to_draw = G.subgraph(pos.keys())
+
+    # Node coloring
+    nodes_list = list(G_to_draw.nodes())
+    num_total_nodes = len(nodes_list)
+    color_map = plt.get_cmap('viridis')
+    node_colors_map = {node: color_map(i / num_total_nodes) for i, node in enumerate(nodes_list)}
+
+    # Draw Edges
+    nx.draw_networkx_edges(G_to_draw, pos, ax=ax, edge_color="gray", alpha=0.6, width=1.0)
+
+    # Draw Nodes
+    labels_for_nodes = {node: str(node) for node in G_to_draw.nodes()}
+    draw_stylized_nodes(ax, pos, labels_for_nodes, node_colors_map, text_size=8, padding=0.4)
+
+    # Draw Edge Labels
+    edge_labels = {(u, v): f"{G_to_draw[u][v]['weight']:.2f}" for u, v in G_to_draw.edges()}
+    for (u, v), label_text in edge_labels.items():
+        if u in pos and v in pos:
+            x_mid = (pos[u][0] + pos[v][0]) / 2
+            y_mid = (pos[u][1] + pos[v][1]) / 2
+            ax.text(x_mid, y_mid, label_text, fontsize=7, ha="center", va="center",
+                    bbox=dict(facecolor="white", edgecolor="none", alpha=0.7, boxstyle="round,pad=0.1"))
+
+    plt.axis("off")
+    ax.relim()
+    ax.autoscale_view()
+
+    filename = os.path.join(output_dir, "main_graph_hierarchical_layout.svg")
+    plt.savefig(filename, format="svg", bbox_inches='tight')
+    print(f"Hierarchical graph visualization saved as '{filename}'.")
+    plt.close()
+
+
+def visualize_claw_subgraphs(G, claws, output_dir):
+    """
+    Visualizes claw sub-graphs in a left-right layout:
       - Main node on the left (fixed x), neighbors on the right (fixed x).
       - Nodes drawn as truly tight, rounded rectangles.
       - Edge labels with a white background and no border.
@@ -371,7 +464,7 @@ def visualize_claw_subgraphs_lr(G, claws, output_dir):
         pos = {main_node: (left_x, 0)}
         spacing = 0.35  # vertical spacing for neighbors
         for i, neighbor in enumerate(neighbors):
-            y = (i - (len(neighbors) - 1)/2) * spacing
+            y = (i - (len(neighbors) - 1) / 2) * spacing
             pos[neighbor] = (right_x, y)
 
         # Colors
@@ -384,7 +477,7 @@ def visualize_claw_subgraphs_lr(G, claws, output_dir):
 
         # Draw nodes as tight, rounded rectangles
         labels = {node: str(node) for node in claw_subgraph.nodes()}
-        draw_tight_stylized_nodes(ax, pos, labels, node_colors)
+        draw_stylized_nodes(ax, pos, labels, node_colors, text_size=8, padding=0.4)
 
         # Edge labels: white background, no border
         edge_labels = {(u, v): f"{G[u][v]['weight']:.2f}" for u, v in claw_subgraph.edges()}
@@ -451,7 +544,7 @@ def visualize_cliques(graph, cliques, output_dir, scale_factor=0.5):
 
             # Draw tight, rounded nodes
             labels = {node: str(node) for node in subgraph.nodes()}
-            draw_tight_stylized_nodes(ax, pos, labels, node_colors)
+            draw_stylized_nodes(ax, pos, labels, node_colors, text_size=8, padding=0.4)
 
             # Edge labels
             edge_labels = {(u, v): f"{graph[u][v].get('weight', 1):.2f}" for u, v in subgraph.edges()}
@@ -506,14 +599,14 @@ def main():
 
     # Step 7: Visualizations
     visualize_main_graph(G, output_dir)
-    #
-    # if cliques:
-    #     visualize_cliques(G, cliques, output_dir)
-    # else:
-    #     print("No cliques found in the graph.")
-    #
-    # if claws:
-    #     visualize_claw_subgraphs_lr(G, claws, output_dir)
+
+    if cliques:
+        visualize_cliques(G, cliques, output_dir)
+    else:
+        print("No cliques found in the graph.")
+
+    if claws:
+        visualize_claw_subgraphs(G, claws, output_dir)
 
 
 if __name__ == "__main__":
