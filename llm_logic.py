@@ -1,79 +1,75 @@
 from llama_cpp import Llama
 import os
 
-# --- Načítanie modelu ---
-# Model sa načíta len raz pri importe modulu, čo šetrí čas a pamäť.
 MODEL_PATH = "./models/mistral-7b-instruct-v0.2.Q4_K_M.gguf"
 if not os.path.exists(MODEL_PATH):
-    raise FileNotFoundError(
-        f"Model nebol nájdený na ceste: {MODEL_PATH}. Uistite sa, že ste ho stiahli a umiestnili správne.")
-
-print("Načítavam LLM model... (môže to chvíľu trvať)")
-llm = Llama(
-    model_path=MODEL_PATH,
-    n_ctx=4096,  # Maximálny kontext, ktorý model spracuje
-    n_gpu_layers=-1,  # Pokúsi sa použiť GPU, ak je k dispozícii (nastavte na 0, ak chcete použiť iba CPU)
-    verbose=False  # Skryje detailné výpisy z llama.cpp
-)
-print("LLM model úspešne načítaný.")
+    raise FileNotFoundError(f"Model nebol nájdený na ceste: {MODEL_PATH}.")
+llm = Llama(model_path=MODEL_PATH, n_ctx=2048, n_gpu_layers=-1, verbose=False)
 
 
-def create_analysis_prompt(subgraph_nodes: list, descriptions: dict) -> str:
-    """Vytvorí úvodný prompt pre analýzu súvislostí v podgrafe."""
-    prompt_parts = []
-    for node in subgraph_nodes:
-        description = descriptions.get(node, 'Popis nie je k dispozícii.')
-        prompt_parts.append(f"- **{node}**: {description}")
+def create_analysis_prompt(subgraph_nodes: list, descriptions: dict, subgraph_type: str) -> str:
+    """Creates a context-aware prompt based on the subgraph type (clique or claw)."""
+    prompt_parts = [f"- **{node}**: {descriptions.get(node, 'No description available.')}" for node in subgraph_nodes]
     description_text = "\n".join(prompt_parts)
 
-    prompt = f"""
-Question: What is the most likely scientific or practical connection between the following attributes?
+    if subgraph_type == 'clique':
+        prompt = f"""
+Context: The following attributes form a 'clique', meaning every attribute is strongly correlated with every other attribute in the group.
+Attributes:
 {description_text}
-Directions. Start with ‘Yes’ or ‘No’, depending on whether there is a direct link, and then explain why in one or two sentences.
+
+Question: What is the underlying physical phenomenon, system, or shared environmental factor that best explains this tight, mutual correlation?
+Instructions: Provide a concise, one-sentence hypothesis. Start your answer with "Yes, the connection is..." or "No, a direct link is unlikely...".
 Answer:"""
+    elif subgraph_type == 'claw':
+        central_node = subgraph_nodes[0]
+        leaf_nodes = ", ".join(subgraph_nodes[1:])
+        prompt = f"""
+Context: The following attributes form a 'claw' structure. The central attribute is '{central_node}'. The 'leaf' attributes ({leaf_nodes}) are each correlated with the central one, but not with each other.
+Attributes:
+{description_text}
+
+Question: What is the most likely causal or influential relationship here? How does the central attribute '{central_node}' act as a driver or a common link for the other attributes?
+Instructions: Provide a concise, one-sentence explanation of the central attribute's role.
+Answer:"""
+    else:  # Fallback pre generický prípad
+        prompt = f"""
+Question: What is the most likely scientific or practical connection between the following attributes?
+Attributes:
+{description_text}
+Instructions: Answer with 'Yes' or 'No', and provide a brief, one-sentence explanation.
+Answer:"""
+
     return prompt
 
 
 def create_synthesis_prompt(original_question: str, answers: list) -> str:
-    """Vytvorí "meta-prompt", ktorý požiada LLM o syntézu predchádzajúcich odpovedí."""
     answer_text = ""
     for i, ans in enumerate(answers):
-        answer_text += f"Odpoveď asistenta #{i + 1}:\n\"{ans}\"\n\n"
-
+        answer_text += f"Answer #{i + 1}:\n\"{ans}\"\n\n"
     prompt = f"""
-The original question was:"{original_question}"
-
-I received the following three independent responses to it from the AI assistant:
+The original question was: "{original_question}"
+I received the following three independent answers from an AI assistant:
 {answer_text}
-Your task is to carefully analyse these three answers. Identify a common conclusion (e.g. whether a link exists) and 
-formulate one final, best and most informative answer that brings them together and takes into account all the 
-information provided. Start with ‘Yes’ or ‘No’.
-
-Final synthesised answer:"""
+Your task is to carefully analyze these three answers. Identify the common conclusion and formulate one final, best, and most informative answer that combines them and considers all the information provided.
+Final Synthesized Answer:"""
     return prompt
 
 
-def get_synthesized_answer(subgraph_nodes: list, descriptions: dict, retries: int = 3) -> tuple:
-    """
-    Orchestruje celý proces: generovanie viacerých odpovedí a ich následnú syntézu.
-
-    Returns:
-        tuple: Obsahuje (finálna_odpoveď, zoznam_pôvodných_odpovedí)
-    """
-    # --- Fáza 1: Generovanie ---
-    initial_prompt = create_analysis_prompt(subgraph_nodes, descriptions)
+def get_synthesized_answer(subgraph_nodes: list, descriptions: dict, subgraph_type: str, retries: int = 3) -> tuple:
+    # Krok 1: Generovanie
+    initial_prompt = create_analysis_prompt(subgraph_nodes, descriptions, subgraph_type)
     initial_responses = []
     for _ in range(retries):
-        output = llm(initial_prompt, max_tokens=100, stop=["\n", "Otázka:"], echo=False)
+        output = llm(initial_prompt, max_tokens=100, stop=["\n", "Question:"], echo=False)
         initial_responses.append(output['choices'][0]['text'].strip())
 
-    # --- Fáza 2: Syntéza ---
+    # Krok 2: Syntéza
     synthesis_prompt = create_synthesis_prompt(
-        original_question=f"What is the relationship between the attributes {', '.join(subgraph_nodes)}?",
+        original_question=f"What is the connection between the attributes {', '.join(subgraph_nodes)}?",
         answers=initial_responses
     )
-
-    final_output = llm(synthesis_prompt, max_tokens=3072, stop=None, echo=False)
+    final_output = llm(synthesis_prompt, max_tokens=150, stop=["\n"], echo=False)
     final_answer = final_output['choices'][0]['text'].strip()
 
     return final_answer, initial_responses
