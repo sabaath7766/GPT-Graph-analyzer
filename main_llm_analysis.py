@@ -4,60 +4,73 @@ from data import ATTRIBUTE_DESCRIPTIONS
 import llm_logic
 
 
-def run_llm_analysis():
-    """
-    Načíta podgrafy, spustí pre ne LLM analýzu a uloží výsledky.
-    """
-    # Cesta k súboru s podgrafmi z predchádzajúceho kroku
-    subgraphs_path = os.path.join("analyzed_subgraphs", "subgraphs_to_analyze.json")
-
-    # Načítanie podgrafov
+def process_subgraph_file(input_path: str, output_list: list, subgraph_type: str):
     try:
-        with open(subgraphs_path, 'r') as f:
+        with open(input_path, 'r', encoding='utf-8') as f:
             subgraphs = json.load(f)
     except FileNotFoundError:
-        print(f"Chyba: Súbor '{subgraphs_path}' nebol nájdený.")
-        print("Najprv spustite skript 'main_analysis.py' na vygenerovanie podgrafov.")
+        print(f"Chyba: Vstupný súbor '{input_path}' nebol nájdený.")
         return
+    print(f"\nNačítaných {len(subgraphs)} podgrafov typu: '{subgraph_type}'. Spúšťam analýzu...")
 
-    print(f"Načítaných {len(subgraphs)} podgrafov na analýzu.")
-
-    # Pripravíme si zoznam na uloženie výsledkov
-    all_results = []
-
-    # Prejdeme každý podgraf a analyzujeme ho
     for i, subgraph_nodes in enumerate(subgraphs):
         print("\n" + "=" * 50)
-        print(f"Spracúvam podgraf #{i + 1}: {subgraph_nodes}")
+        print(f"Spracúvam '{subgraph_type}' #{i + 1}: {subgraph_nodes}")
         print("=" * 50)
 
-        # Zavoláme hlavnú funkciu z našej knižnice
         final_answer, original_responses = llm_logic.get_synthesized_answer(
-            subgraph_nodes,
-            ATTRIBUTE_DESCRIPTIONS
+            subgraph_nodes, ATTRIBUTE_DESCRIPTIONS, subgraph_type=subgraph_type
         )
 
-        print("\n--- Pôvodné odpovede od LLM ---")
+        ## ZMENA: Pridaný výpis 3 pôvodných odpovedí
+        print("\n--- Pôvodné 3 odpovede od LLM ---")
         for j, r in enumerate(original_responses):
-            print(f"Odpoveď {j + 1}: {r}")
+            print(f"Odpoveď #{j + 1}: {r}")
 
-        print("\n--- FINÁLNA SYNTETIZOVANÁ ODPOVEĎ ---")
-        print(final_answer)
+        print("\n--- Finálna syntetizovaná odpoveď ---")
+        print(f"✅ {final_answer}")
 
-        # Uložíme výsledok pre tento podgraf
-        all_results.append({
-            "subgraph_nodes": subgraph_nodes,
+        output_list.append({
+            "subgraph_type": subgraph_type,
+            "nodes_data": subgraph_nodes,
             "synthesized_analysis": final_answer,
             "original_responses": original_responses
         })
 
-    # Uloženie všetkých výsledkov do jedného JSON súboru
-    results_path = os.path.join("analyzed_subgraphs", "llm_analysis_results.json")
+
+def run_llm_analysis():
+    """Hlavná funkcia, ktorá riadi celý proces."""
+    try:
+        all_dirs = sorted([d for d in os.listdir("outputs") if os.path.isdir(os.path.join("outputs", d))])
+        # Použijeme predposledný (-2) priečinok podľa vašej požiadavky
+        target_dir_index = -2 if len(all_dirs) >= 2 else -1
+        latest_output_dir = all_dirs[target_dir_index]
+        input_dir = os.path.join("outputs", latest_output_dir)
+        print(f"Spracúvam dáta z priečinka: '{input_dir}'")
+    except (IndexError, FileNotFoundError):
+        print("Chyba: Nebol nájdený žiadny výstupný priečinok v 'outputs'.")
+        return
+
+    claw_results = []
+    clique_results = []
+
+    # Poradie je teraz CLAWS -> CLIQUES
+    process_subgraph_file(os.path.join(input_dir, "claws.json"), claw_results, "claw")
+    process_subgraph_file(os.path.join(input_dir, "cliques.json"), clique_results, "clique")
+
+    all_results = claw_results + clique_results
+    if not all_results:
+        print("\nNeboli nájdené žiadne podgrafy na analýzu. Proces končí.")
+        return
+
+    output_dir_llm = "llm_analysis_results"
+    os.makedirs(output_dir_llm, exist_ok=True)
+    results_path = os.path.join(output_dir_llm, "all_analyses.json")
+
     with open(results_path, 'w', encoding='utf-8') as f:
         json.dump(all_results, f, indent=2, ensure_ascii=False)
 
-    print("\n" + "=" * 50)
-    print(f"Analýza je dokončená! Všetky výsledky boli uložené do súboru '{results_path}'.")
+    print(f"\nAnalýza dokončená! Výsledky uložené do '{results_path}'.")
 
 
 if __name__ == "__main__":

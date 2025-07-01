@@ -1,79 +1,78 @@
+# Súbor: llm_logic.py (Verzia s finálnou opravou)
 from llama_cpp import Llama
 import os
 
-# --- Načítanie modelu ---
-# Model sa načíta len raz pri importe modulu, čo šetrí čas a pamäť.
+# Načítanie modelu zostáva bez zmeny
 MODEL_PATH = "./models/mistral-7b-instruct-v0.2.Q4_K_M.gguf"
 if not os.path.exists(MODEL_PATH):
-    raise FileNotFoundError(
-        f"Model nebol nájdený na ceste: {MODEL_PATH}. Uistite sa, že ste ho stiahli a umiestnili správne.")
-
-print("Načítavam LLM model... (môže to chvíľu trvať)")
-llm = Llama(
-    model_path=MODEL_PATH,
-    n_ctx=4096,  # Maximálny kontext, ktorý model spracuje
-    n_gpu_layers=-1,  # Pokúsi sa použiť GPU, ak je k dispozícii (nastavte na 0, ak chcete použiť iba CPU)
-    verbose=False  # Skryje detailné výpisy z llama.cpp
-)
-print("LLM model úspešne načítaný.")
+    raise FileNotFoundError(f"Model nebol nájdený na ceste: {MODEL_PATH}.")
+llm = Llama(model_path=MODEL_PATH, n_ctx=2048, n_gpu_layers=-1, verbose=False)
 
 
-def create_analysis_prompt(subgraph_nodes: list, descriptions: dict) -> str:
-    """Vytvorí úvodný prompt pre analýzu súvislostí v podgrafe."""
-    prompt_parts = []
-    for node in subgraph_nodes:
-        description = descriptions.get(node, 'Popis nie je k dispozícii.')
-        prompt_parts.append(f"- **{node}**: {description}")
+def create_analysis_prompt(subgraph_nodes: list, descriptions: dict, subgraph_type: str) -> str:
+    # Táto funkcia je už v poriadku a zostáva bez zmeny
+    prompt_parts = [f"- **{node}**: {descriptions.get(node, 'No description available.')}" for node in subgraph_nodes]
     description_text = "\n".join(prompt_parts)
-
+    if subgraph_type == 'clique':
+        context_description = "The following attributes exhibit a special relationship: every attribute in this group is strongly and directly correlated with every other attribute."
+        question = "Is there a clear underlying physical phenomenon or shared system that explains this tight, mutual correlation?"
+        instructions = "You MUST start your answer with 'Yes,' followed by a concise, one-sentence hypothesis, or 'No,' if a direct link is unlikely."
+    elif subgraph_type == 'claw':
+        central_node, leaf_nodes = subgraph_nodes[0], subgraph_nodes[1:]
+        context_description = f"The following attributes exhibit a 'hub-and-spoke' relationship. The central attribute '{central_node}' is strongly correlated with each of the 'leaf' attributes: {', '.join(leaf_nodes)}. However, the leaf attributes are not strongly correlated with each other."
+        question = f"Is there a clear causal or influential relationship here, with '{central_node}' acting as a driver?"
+        instructions = f"You MUST start your answer with 'Yes,' and then explain the role of the central node '{central_node}', or 'No,' if the relationship is not clear."
+    else:
+        context_description = "Analyze the relationship between the following attributes."
+        question = "Is there a likely connection?"
+        instructions = "You MUST start your answer with 'Yes,' or 'No,' followed by a brief explanation."
     prompt = f"""
-Question: What is the most likely scientific or practical connection between the following attributes?
+Context: {context_description}
+Attributes:
 {description_text}
-Directions. Start with ‘Yes’ or ‘No’, depending on whether there is a direct link, and then explain why in one or two sentences.
+Question: {question}
+Instructions: {instructions}
 Answer:"""
     return prompt
 
 
 def create_synthesis_prompt(original_question: str, answers: list) -> str:
-    """Vytvorí "meta-prompt", ktorý požiada LLM o syntézu predchádzajúcich odpovedí."""
     answer_text = ""
     for i, ans in enumerate(answers):
-        answer_text += f"Odpoveď asistenta #{i + 1}:\n\"{ans}\"\n\n"
-
+        answer_text += f"Answer #{i + 1}:\n\"{ans}\"\n\n"
     prompt = f"""
-The original question was:"{original_question}"
-
-I received the following three independent responses to it from the AI assistant:
+The original question was: "{original_question}"
+I received the following three independent answers from an AI assistant:
 {answer_text}
-Your task is to carefully analyse these three answers. Identify a common conclusion (e.g. whether a link exists) and 
-formulate one final, best and most informative answer that brings them together and takes into account all the 
-information provided. Start with ‘Yes’ or ‘No’.
-
-Final synthesised answer:"""
+Your task: Synthesize these three answers into a single, conclusive, and well-formulated final answer. Identify the common conclusion (especially the 'Yes' or 'No' part) and combine the explanations. Start your response directly with the synthesized conclusion.
+Final Synthesized Conclusion:"""
     return prompt
 
 
-def get_synthesized_answer(subgraph_nodes: list, descriptions: dict, retries: int = 3) -> tuple:
-    """
-    Orchestruje celý proces: generovanie viacerých odpovedí a ich následnú syntézu.
-
-    Returns:
-        tuple: Obsahuje (finálna_odpoveď, zoznam_pôvodných_odpovedí)
-    """
-    # --- Fáza 1: Generovanie ---
-    initial_prompt = create_analysis_prompt(subgraph_nodes, descriptions)
+def get_synthesized_answer(subgraph_nodes: list, descriptions: dict, subgraph_type: str, retries: int = 3) -> tuple:
+    initial_prompt = create_analysis_prompt(subgraph_nodes, descriptions, subgraph_type)
     initial_responses = []
-    for _ in range(retries):
-        output = llm(initial_prompt, max_tokens=100, stop=["\n", "Otázka:"], echo=False)
-        initial_responses.append(output['choices'][0]['text'].strip())
 
-    # --- Fáza 2: Syntéza ---
+    for _ in range(retries):
+        output = llm(initial_prompt, max_tokens=1024, echo=False)
+        response_text = output['choices'][0]['text'].strip()
+        initial_responses.append(response_text)
+
+    if not any(initial_responses):
+        return "Model did not provide any initial answers.", initial_responses
+
     synthesis_prompt = create_synthesis_prompt(
-        original_question=f"What is the relationship between the attributes {', '.join(subgraph_nodes)}?",
+        original_question=f"Is there a connection between the attributes {', '.join(subgraph_nodes)}? "
+                          f"Start the sentence with a Yes or No.",
         answers=initial_responses
     )
 
-    final_output = llm(synthesis_prompt, max_tokens=3072, stop=None, echo=False)
+    # Model teraz bude generovať, kým neskončí alebo nenarazí na vysoký limit tokenov.
+    final_output = llm(
+        synthesis_prompt,
+        max_tokens=2048,  # Ponechávame vysoký limit
+        echo=False
+    )
     final_answer = final_output['choices'][0]['text'].strip()
 
     return final_answer, initial_responses
