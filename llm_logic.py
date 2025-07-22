@@ -1,4 +1,6 @@
-# Súbor: llm_logic.py (Verzia s finálnou opravou)
+# llm_logic.py
+
+
 from llama_cpp import Llama
 import os
 

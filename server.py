@@ -1,106 +1,109 @@
+# server.py (UPRAVENÁ VERZIA)
+
 from flask import Flask, jsonify
 from flask_cors import CORS
 import json
 import os
-
-# Importujeme popisy atribútov priamo z vášho existujúceho súboru
+import pandas as pd
+import numpy as np
+import graph_analyzer
 from data import ATTRIBUTE_DESCRIPTIONS
 
-# Inicializácia Flask aplikácie
 app = Flask(__name__)
 CORS(app)
 
+ANALYSES_DATA = []
+GRAPH_INSTANCE = None
 
-def find_target_directory():
+
+def load_data_and_graph():
     """
-    Nájde a vráti cestu k predposlednému (alebo poslednému, ak je len jeden)
-    výstupnému priečinku v adresári 'outputs'.
+    Načíta finálne výsledky, zotriedi ich (claws prvé), očísluje
+    a načíta pôvodný graf pre vizualizácie.
     """
+    global ANALYSES_DATA, GRAPH_INSTANCE
+
+    analyses_path = os.path.join("llm_analysis_results", "all_analyses.json")
     try:
-        all_dirs = sorted([d for d in os.listdir("outputs") if os.path.isdir(os.path.join("outputs", d))])
-        if not all_dirs:
-            return None, "No output directories found in 'outputs'."
-
-        # Použijeme predposledný (-2), ak existujú aspoň dva, inak posledný (-1)
-        target_dir_name = all_dirs[-2] if len(all_dirs) >= 2 else all_dirs[-1]
-        return os.path.join("outputs", target_dir_name), None
+        with open(analyses_path, 'r', encoding='utf-8') as f:
+            raw_analyses = json.load(f)
     except FileNotFoundError:
-        return None, "The 'outputs' directory was not found."
+        print(f"KRITICKÁ CHYBA: Súbor s analýzami '{analyses_path}' nebol nájdený.")
+        return
+
+    try:
+        df = pd.read_csv('datasets/energydata.csv').drop(columns=['date', 'lights'])
+        corr_matrix = df.corr()
+        cor_values = corr_matrix.values[~np.eye(corr_matrix.shape[0], dtype=bool)]
+        threshold = (corr_matrix.values.max() + cor_values.mean()) / 2 + 0.1
+        trimmed_matrix_np = np.where(np.abs(corr_matrix) > threshold, corr_matrix, 0)
+        np.fill_diagonal(trimmed_matrix_np, 0)
+        nodes = corr_matrix.columns.tolist()
+        GRAPH_INSTANCE = graph_analyzer.construct_graph(trimmed_matrix_np, nodes)
+        print("Pôvodný graf úspešne zrekonštruovaný pre vizualizácie.")
     except Exception as e:
-        return None, f"An error occurred while finding the directory: {e}"
+        print(f"CHYBA pri rekonštrukcii grafu: {e}. Vizualizácie nebudú dostupné.")
+        GRAPH_INSTANCE = None
 
+    # --- NOVÁ ČASŤ: Zoradenie a oddelené číslovanie ---
+    claws = []
+    cliques = []
 
-def process_subgraph_file(filepath, subgraph_type):
-    """
-    Načíta súbor s podgrafmi, priradí im typ a vráti zoznam objektov.
-    """
-    try:
-        with open(filepath, 'r', encoding='utf-8') as f:
-            subgraphs_data = json.load(f)
-    except FileNotFoundError:
-        print(f"Info: File not found at '{filepath}', skipping.")
-        return []  # Vrátime prázdny zoznam, ak súbor neexistuje
+    for item in raw_analyses:
+        if item.get("subgraph_type") == 'clique':
+            cliques.append(item)
+        else:
+            claws.append(item)
 
-    processed_list = []
-    for nodes in subgraphs_data:
-        processed_list.append({
-            "type": subgraph_type,
-            "nodes": nodes
+    # Spojíme zoznamy - claws budú prvé
+    sorted_analyses = claws + cliques
+
+    # --- UPRAVENÁ ČASŤ: Formátovanie dát s novým číslovaním ---
+    formatted_analyses = []
+    claw_counter = 1
+    clique_counter = 1
+
+    for i, item in enumerate(sorted_analyses):
+        nodes = item.get("nodes_data", [])
+        subgraph_type = item.get("subgraph_type", "unknown")
+
+        name = ""
+        viz_b64 = None
+
+        if subgraph_type == 'clique':
+            name = f"Clique #{clique_counter}"
+            clique_counter += 1
+            if GRAPH_INSTANCE:
+                viz_b64 = graph_analyzer.create_single_clique_viz_base64(GRAPH_INSTANCE, nodes)
+        else:  # Predpokladáme, že všetko ostatné je 'claw'
+            name = f"Claw #{claw_counter} (Center: {nodes[0]})" if nodes else f"Claw #{claw_counter}"
+            claw_counter += 1
+            if GRAPH_INSTANCE:
+                viz_b64 = graph_analyzer.create_single_claw_viz_base64(GRAPH_INSTANCE, nodes)
+
+        formatted_analyses.append({
+            "id": f"{subgraph_type}-{i}",  # Unikátne ID pre React
+            "name": name,
+            "attributes": {node: True for node in nodes},
+            "correlationText": item.get("synthesized_analysis", "Analysis not available."),
+            "originalResponses": item.get("original_responses", []),
+            "visualization_b64": viz_b64
         })
-    return processed_list
+
+    ANALYSES_DATA = formatted_analyses
+    print(
+        f"Dáta úspešne načítané. Pripravených {len(ANALYSES_DATA)} analýz ({len(claws)} claws, {len(cliques)} cliques).")
 
 
 @app.route('/api/analyses')
 def get_analyses():
-    """
-    Tento endpoint dynamicky nájde správny priečinok, načíta dáta
-    z `cliques.json` a `claws.json`, spojí ich a pošle do frontendu.
-    """
-    target_dir, error = find_target_directory()
-    if error:
-        return jsonify({"error": error}), 404
-
-    # Načítame a spracujeme oba typy súborov
-    cliques = process_subgraph_file(os.path.join(target_dir, "cliques.json"), "clique")
-    claws = process_subgraph_file(os.path.join(target_dir, "claws.json"), "claw")
-
-    all_subgraphs = cliques + claws
-
-    if not all_subgraphs:
-        return jsonify({"error": f"No cliques or claws found in the target directory: {target_dir}"}), 404
-
-    # Teraz dáta preformátujeme pre React, rovnako ako predtým
-    formatted_graphs = []
-    for i, analysis_obj in enumerate(all_subgraphs):
-        subgraph_type = analysis_obj["type"]
-        nodes = analysis_obj["nodes"]
-        name = ""
-
-        if subgraph_type == 'clique':
-            name = f"Clique #{i + 1}"
-        elif subgraph_type == 'claw' and nodes:
-            name = f"Claw #{i + 1} (Center: {nodes[0]})"
-        else:
-            name = f"Subgraph #{i + 1}"
-
-        formatted_graphs.append({
-            "id": i,
-            "name": name,
-            "description": f"A {subgraph_type} structure with {len(nodes)} attributes.",
-            "attributes": {node: True for node in nodes},
-            # Tieto polia pridáme ako prázdne, pretože ich LLM analýza ešte neprebehla
-            "correlationText": "Awaiting LLM analysis...",
-            "originalResponses": []
-        })
-
-    return jsonify(formatted_graphs)
+    if not ANALYSES_DATA:
+        return jsonify({"error": "No analysis data found. Please run the data processing pipeline first."}), 500
+    return jsonify(ANALYSES_DATA)
 
 
 @app.route('/api/attribute_metadata')
 def get_attribute_metadata():
-    """
-    Tento endpoint vracia popisy atribútov.
-    """
     metadata_for_react = {
         key: {"description": value}
         for key, value in ATTRIBUTE_DESCRIPTIONS.items()
@@ -109,6 +112,6 @@ def get_attribute_metadata():
 
 
 if __name__ == '__main__':
-    print("Spúšťam Python Flask server na adrese http://127.0.0.1:5000...")
+    load_data_and_graph()
+    print("\nSpúšťam Python Flask server na adrese http://127.0.0.1:5000...")
     app.run(debug=True, port=5000)
-
