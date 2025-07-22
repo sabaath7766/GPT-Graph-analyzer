@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GPT Graph Analyzer</title>
+    <!-- Načítanie Tailwind CSS pre štýlovanie -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Načítanie React a ReactDOM -->
+    <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <!-- Načítanie Babel na preklad JSX priamo v prehliadači -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <style>
+        /* Jednoduchý štýl pre scrollbar v modálnom okne */
+        .modal-content::-webkit-scrollbar { width: 8px; }
+        .modal-content::-webkit-scrollbar-track { background: #f1f1f1; border-radius: 10px; }
+        .modal-content::-webkit-scrollbar-thumb { background: #888; border-radius: 10px; }
+        .modal-content::-webkit-scrollbar-thumb:hover { background: #555; }
+    </style>
+</head>
+<body class="bg-gray-100">
+    <div id="root"></div>
+
+    <script type="text/babel">
+        // Importujeme hooky priamo z Reactu
+        const { useState, useEffect } = React;
+
+        // Komponent pre zobrazenie pôvodných odpovedí
+        const OriginalResponses = ({ responses }) => {
+            if (!responses || responses.length === 0) return null;
+            return (
+                <div className="mt-4">
+                    <h4 className="text-lg font-semibold text-gray-700 mb-2">Original AI Responses</h4>
+                    <div className="space-y-3">
+                        {responses.map((resp, index) => (
+                            <div key={index} className="bg-gray-100 p-3 rounded-lg border">
+                                <p className="text-sm text-gray-600">
+                                    <span className="font-bold">Response #{index + 1}:</span> {resp}
+                                </p>
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            );
+        };
+
+        // Hlavný App komponent
+        const App = () => {
+            const [analyses, setAnalyses] = useState([]);
+            const [selectedAnalysis, setSelectedAnalysis] = useState(null);
+            const [filters, setFilters] = useState({});
+            const [loading, setLoading] = useState(true);
+            const [error, setError] = useState(null);
+            const [attributeMetadata, setAttributeMetadata] = useState({});
+
+            useEffect(() => {
+                const fetchData = async () => {
+                    try {
+                        // Krok 1: Načítanie metadát atribútov
+                        const metadataResponse = await fetch('http://127.0.0.1:5000/api/attribute_metadata');
+                        if (!metadataResponse.ok) {
+                            throw new Error(`Metadata fetch failed: ${metadataResponse.statusText}`);
+                        }
+                        const fetchedMetadata = await metadataResponse.json();
+                        setAttributeMetadata(fetchedMetadata);
+
+                        const initialFilters = {};
+                        Object.keys(fetchedMetadata).forEach(attr => { initialFilters[attr] = false; });
+                        setFilters(initialFilters);
+
+                        // Krok 2: Načítanie výsledkov analýz
+                        const analysesResponse = await fetch('http://127.0.0.1:5000/api/analyses');
+                        if (!analysesResponse.ok) {
+                            // Pokúsime sa získať detailnejšiu chybu z tela odpovede
+                            const errorData = await analysesResponse.json().catch(() => null);
+                            const errorMessage = errorData?.error || `Analyses fetch failed with status: ${analysesResponse.statusText}`;
+                            throw new Error(errorMessage);
+                        }
+                        const fetchedAnalyses = await analysesResponse.json();
+                        setAnalyses(fetchedAnalyses);
+
+                    } catch (err) {
+                        console.error('Error fetching data:', err);
+                        // Zobrazíme detailnejšiu chybovú hlášku
+                        setError(`Failed to load data from the backend. Reason: ${err.message}`);
+                    } finally {
+                        setLoading(false);
+                    }
+                };
+                fetchData();
+            }, []);
+
+            const handleCardClick = (analysis) => setSelectedAnalysis(analysis);
+            const closeModal = () => setSelectedAnalysis(null);
+            const handleFilterChange = (e) => {
+                const { name, checked } = e.target;
+                setFilters(prev => ({ ...prev, [name]: checked }));
+            };
+
+            const activeFilters = Object.keys(filters).filter(key => filters[key]);
+            const filteredAnalyses = analyses.filter(analysis => {
+                if (activeFilters.length === 0) return true;
+                return activeFilters.every(attr => analysis.attributes.hasOwnProperty(attr));
+            });
+
+            if (loading) {
+                return (
+                    <div className="flex items-center justify-center min-h-screen font-sans">
+                        <p className="text-xl text-gray-700 animate-pulse">Loading analysis data...</p>
+                    </div>
+                );
+            }
+
+            if (error) {
+                return (
+                    <div className="flex items-center justify-center min-h-screen font-sans p-4">
+                        <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-lg text-center">
+                            <strong className="font-bold">Error:</strong>
+                            <span className="block sm:inline ml-2">{error}</span>
+                        </div>
+                    </div>
+                );
+            }
+
+            return (
+                <div className="min-h-screen bg-gray-100 p-4 sm:p-6 font-sans flex flex-col items-center">
+                    <header className="w-full max-w-6xl text-center mb-8">
+                        <h1 className="text-4xl font-bold text-gray-800 mb-2">Graph Structure Analyzer</h1>
+                        <p className="text-lg text-gray-600">Explore attribute correlations analyzed by a local LLM.</p>
+                    </header>
+
+                    <div className="w-full max-w-6xl bg-white rounded-xl shadow-lg p-6 mb-8">
+                        <h2 className="text-2xl font-semibold text-gray-700 mb-4">Filter by Attribute</h2>
+                        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-4">
+                            {Object.entries(attributeMetadata).map(([attrName, metadata]) => (
+                                <label key={attrName} className="flex items-center cursor-pointer p-2 bg-gray-50 rounded-lg hover:bg-gray-200 transition-colors">
+                                    <input
+                                        type="checkbox"
+                                        name={attrName}
+                                        checked={filters[attrName] || false}
+                                        onChange={handleFilterChange}
+                                        className="form-checkbox h-5 w-5 text-indigo-600 rounded focus:ring-indigo-500"
+                                    />
+                                    <span className="ml-2 text-gray-800 text-sm font-medium">{attrName}</span>
+                                </label>
+                            ))}
+                        </div>
+                    </div>
+
+                    <div className="w-full max-w-6xl bg-white rounded-xl shadow-lg p-6">
+                        <h2 className="text-2xl font-semibold text-gray-700 mb-4">Analysis Results ({filteredAnalyses.length})</h2>
+                        {filteredAnalyses.length === 0 ? (
+                            <p className="text-gray-500 text-center py-8">No analysis results match your current filters.</p>
+                        ) : (
+                            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
+                                {filteredAnalyses.map((analysis) => (
+                                    <div
+                                        key={analysis.id}
+                                        className="bg-white border border-gray-200 rounded-xl p-4 cursor-pointer hover:shadow-xl hover:border-indigo-500 transition-all duration-300 flex flex-col justify-between"
+                                        onClick={() => handleCardClick(analysis)}
+                                    >
+                                        <div>
+                                            <h3 className="text-xl font-bold text-indigo-800 mb-2">{analysis.name}</h3>
+                                            <p className="text-gray-600 text-sm mb-3 line-clamp-3">{analysis.correlationText}</p>
+                                        </div>
+                                        <div className="mt-4 text-right text-indigo-600 font-semibold hover:underline">
+                                            View Details &rarr;
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+                    </div>
+
+                    {selectedAnalysis && (
+                        <div className="fixed inset-0 bg-black bg-opacity-60 flex items-center justify-center p-4 z-50">
+                            <div
+                                className="bg-white rounded-xl shadow-2xl p-6 w-full max-w-2xl relative my-8 max-h-[90vh] overflow-y-auto modal-content"
+                                onClick={(e) => e.stopPropagation()}
+                            >
+                                <button onClick={closeModal} className="absolute top-4 right-4 text-gray-400 hover:text-gray-800 text-3xl">&times;</button>
+                                <h2 className="text-3xl font-bold text-gray-800 mb-4">{selectedAnalysis.name}</h2>
+
+                                <div className="bg-indigo-50 rounded-lg p-4 mb-6 border border-indigo-200">
+                                    <h3 className="text-lg font-semibold text-indigo-900 mb-2">Synthesized Conclusion</h3>
+                                    <p className="text-gray-800 italic">{selectedAnalysis.correlationText}</p>
+                                </div>
+
+                                <h3 className="text-xl font-semibold text-gray-700 mb-3">Attributes in this Group:</h3>
+                                <ul className="list-disc list-inside bg-gray-50 p-4 rounded-lg mb-6">
+                                    {Object.keys(selectedAnalysis.attributes).map((attrName) => (
+                                        <li key={attrName} className="text-gray-700">
+                                            <span className="font-semibold">{attrName}:</span> {attributeMetadata[attrName]?.description || 'N/A'}
+                                        </li>
+                                    ))}
+                                </ul>
+
+                                <OriginalResponses responses={selectedAnalysis.originalResponses} />
+
+                                <button onClick={closeModal} className="mt-6 w-full bg-indigo-600 text-white py-3 rounded-lg hover:bg-indigo-700 transition-colors font-semibold shadow-md">
+                                    Close
+                                </button>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            );
+        };
+
+        // Renderujeme App komponent do divu s id="root"
+        const container = document.getElementById('root');
+        const root = ReactDOM.createRoot(container);
+        root.render(<App />);
+    </script>
+</body>
+</html>
