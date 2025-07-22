@@ -1,5 +1,3 @@
-# graph_analyzer.py
-
 import numpy as np
 import networkx as nx
 import matplotlib.pyplot as plt
@@ -116,5 +114,28 @@ def create_single_claw_viz_base64(graph, claw_nodes):
 
     ax.set_xlim(0, 1)
     ax.set_ylim(0, 1)
+
+    return fig_to_base64(fig)
+
+
+def create_full_graph_viz_base64(graph):
+    """
+    Vytvorí vizualizáciu celého grafu a vráti ju ako base64 reťazec.
+    """
+    if graph is None or not isinstance(graph, nx.Graph):
+        return None
+
+    pos = nx.spring_layout(graph, seed=42)
+    node_labels = {node: node for node in graph.nodes()}
+
+    fig, ax = plt.subplots(figsize=(12, 10))
+
+    # Kreslenie uzlov a hrán
+    nx.draw_networkx_nodes(graph, pos, node_color='#A0CBE2', node_size=2000, ax=ax)
+    nx.draw_networkx_edges(graph, pos, width=2, edge_color='gray', ax=ax)
+    nx.draw_networkx_labels(graph, pos, labels=node_labels, font_size=10, font_weight='bold', ax=ax)
+
+    ax.set_title("Full Correlation Graph", fontsize=20)
+    ax.axis('off')
 
     return fig_to_base64(fig)

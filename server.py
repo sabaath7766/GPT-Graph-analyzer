@@ -1,5 +1,3 @@
-# server.py (UPRAVENÁ VERZIA)
-
 from flask import Flask, jsonify
 from flask_cors import CORS
 import json
@@ -45,7 +43,7 @@ def load_data_and_graph():
         print(f"CHYBA pri rekonštrukcii grafu: {e}. Vizualizácie nebudú dostupné.")
         GRAPH_INSTANCE = None
 
-    # --- NOVÁ ČASŤ: Zoradenie a oddelené číslovanie ---
+    # --- NOVÁ ČASŤ: Zoradenie a oddelené číslovanie pre claws a kliky
     claws = []
     cliques = []
 
@@ -61,33 +59,48 @@ def load_data_and_graph():
     # --- UPRAVENÁ ČASŤ: Formátovanie dát s novým číslovaním ---
     formatted_analyses = []
     claw_counter = 1
-    clique_counter = 1
+    clique_counter_3 = 1
+    clique_counter_4 = 1
+    clique_counter_5 = 1
 
     for i, item in enumerate(sorted_analyses):
-        nodes = item.get("nodes_data", [])
+        nodes_data = item.get("nodes_data", [])
         subgraph_type = item.get("subgraph_type", "unknown")
 
         name = ""
         viz_b64 = None
 
         if subgraph_type == 'clique':
-            name = f"Clique #{clique_counter}"
-            clique_counter += 1
+            node_count = len(nodes_data)
+            if node_count == 3:
+                name = f"3-Node Clique #{clique_counter_3}"
+                clique_counter_3 += 1
+            elif node_count == 4:
+                name = f"4-Node Clique #{clique_counter_4}"
+                clique_counter_4 += 1
+            elif node_count == 5:
+                name = f"5-Node Clique #{clique_counter_5}"
+                clique_counter_5 += 1
+            else:
+                name = f"Clique (Unknown Size) #{i}" # Fallback
             if GRAPH_INSTANCE:
-                viz_b64 = graph_analyzer.create_single_clique_viz_base64(GRAPH_INSTANCE, nodes)
+                viz_b64 = graph_analyzer.create_single_clique_viz_base64(GRAPH_INSTANCE, nodes_data)
         else:  # Predpokladáme, že všetko ostatné je 'claw'
-            name = f"Claw #{claw_counter} (Center: {nodes[0]})" if nodes else f"Claw #{claw_counter}"
+            name = f"Claw #{claw_counter} (Center: {nodes_data[0]})" if nodes_data else f"Claw #{claw_counter}"
             claw_counter += 1
             if GRAPH_INSTANCE:
-                viz_b64 = graph_analyzer.create_single_claw_viz_base64(GRAPH_INSTANCE, nodes)
+                viz_b64 = graph_analyzer.create_single_claw_viz_base64(GRAPH_INSTANCE, nodes_data)
 
+        # Doplnenie údajov o podgrafe pre jednoduchšie filtrovanie v React
         formatted_analyses.append({
-            "id": f"{subgraph_type}-{i}",  # Unikátne ID pre React
+            "id": f"{subgraph_type}-{i}",
             "name": name,
-            "attributes": {node: True for node in nodes},
+            "attributes": {node: True for node in nodes_data},
             "correlationText": item.get("synthesized_analysis", "Analysis not available."),
             "originalResponses": item.get("original_responses", []),
-            "visualization_b64": viz_b64
+            "visualization_b64": viz_b64,
+            "subgraph_type": subgraph_type,
+            "nodes_data": nodes_data
         })
 
     ANALYSES_DATA = formatted_analyses
@@ -109,6 +122,17 @@ def get_attribute_metadata():
         for key, value in ATTRIBUTE_DESCRIPTIONS.items()
     }
     return jsonify(metadata_for_react)
+
+@app.route('/api/full_graph')
+def get_full_graph_visualization():
+    if GRAPH_INSTANCE is None:
+        return jsonify({"error": "Main graph is not available. Please check the backend console for errors during graph reconstruction."}), 500
+    try:
+        viz_b64 = graph_analyzer.create_full_graph_viz_base64(GRAPH_INSTANCE)
+        return jsonify({"visualization_b64": viz_b64})
+    except Exception as e:
+        print(f"Error creating full graph visualization: {e}")
+        return jsonify({"error": "Failed to create full graph visualization. Please check the backend logs."}), 500
 
 
 if __name__ == '__main__':
