@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="sk">
+<head>
+    <meta charset="UTF-8">
+    <title>Detail Analýzy: {{ filename }}</title>
+    <style>
+        body { font-family: sans-serif; margin: 0 auto; max-width: 1200px; padding: 2em; background-color: #f8f9fa; color: #212529; }
+        .container { display: grid; grid-template-columns: 1fr 2fr; gap: 2em; }
+        .sidebar { background-color: #fff; padding: 1.5em; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.05); }
+        .main-content { }
+        h1, h2 { color: #0056b3; border-bottom: 2px solid #dee2e6; padding-bottom: 0.3em; }
+        .summary-item { margin-bottom: 0.8em; }
+        .summary-item strong { color: #495057; }
+        .analysis-card { background-color: #fff; border: 1px solid #e9ecef; border-radius: 8px; margin-bottom: 1.5em; padding: 1.5em; box-shadow: 0 2px 5px rgba(0,0,0,0.05); }
+        .card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1em; }
+        .card-header h3 { margin: 0; }
+        .badge { background-color: #17a2b8; color: white; padding: 0.3em 0.7em; border-radius: 12px; font-size: 0.9em; }
+        .badge.claw { background-color: #fd7e14; }
+        .nodes { font-family: monospace; background-color: #e9ecef; padding: 0.5em; border-radius: 4px; word-break: break-all; }
+        .full-graph img { max-width: 100%; height: auto; border-radius: 8px; }
+        a { color: #007bff; }
+    </style>
+</head>
+<body>
+    <a href="/">&larr; Späť na zoznam</a>
+    <h1>Detail Analýzy: {{ filename }}</h1>
+
+    <div class="container">
+        <aside class="sidebar">
+            <h2>Súhrn</h2>
+            <div class="summary-item"><strong>Dataset:</strong> {{ data.dataset_name }}</div>
+            <div class="summary-item"><strong>Alpha:</strong> {{ data.alpha }}</div>
+            <div class="summary-item"><strong>Celkový počet uzlov:</strong> {{ data.total_nodes }}</div>
+            <div class="summary-item"><strong>Celkový počet hrán:</strong> {{ data.total_edges }}</div>
+            <div class="summary-item"><strong>Nájdené kliky:</strong> {{ data.found_cliques_count }}</div>
+            <div class="summary-item"><strong>Nájdené "claws":</strong> {{ data.found_claws_count }}</div>
+
+            <h2 style="margin-top: 2em;">Celkový Graf</h2>
+            <div class="full-graph">
+                {% if data.full_graph_visualization %}
+                    <img src="{{ data.full_graph_visualization }}" alt="Vizualizácia celého grafu">
+                {% else %}
+                    <p>Vizualizácia nie je dostupná.</p>
+                {% endif %}
+            </div>
+        </aside>
+
+        <main class="main-content">
+            <h2>Výsledky LLM Analýzy</h2>
+            {% for analysis in data.llm_analyses %}
+            <div class="analysis-card">
+                <div class="card-header">
+                    <h3>Analýza podgrafu</h3>
+                    <span class="badge {{ 'claw' if analysis.subgraph_type == 'claw' else 'clique' }}">{{ analysis.subgraph_type }}</span>
+                </div>
+                <h4>Uzly:</h4>
+                <p class="nodes">{{ analysis.nodes_data | join(', ') }}</p>
+                <h4>Syntetizovaný záver LLM:</h4>
+                <p>{{ analysis.synthesized_analysis }}</p>
+            </div>
+            {% else %}
+                <p>Pre túto analýzu neboli nájdené žiadne podgrafy na spracovanie LLM.</p>
+            {% endfor %}
+        </main>
+    </div>
+</body>
+</html>
