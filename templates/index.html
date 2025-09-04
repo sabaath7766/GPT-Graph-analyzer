@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="sk">
+<head>
+    <meta charset="UTF-8">
+    <title>Zoznam Analýz</title>
+    <style>
+        body { font-family: sans-serif; margin: 2em; background-color: #f4f4f9; color: #333; }
+        h1 { color: #2c3e50; }
+        ul { list-style-type: none; padding: 0; }
+        li { background-color: #fff; margin: 0.5em 0; padding: 1em; border-radius: 5px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        a { text-decoration: none; color: #3498db; font-weight: bold; }
+        a:hover { color: #2980b9; }
+    </style>
+</head>
+<body>
+    <h1>Dostupné analýzy</h1>
+    {% if files %}
+        <ul>
+            {% for file in files %}
+                <li><a href="{{ url_for('analysis_detail', filename=file) }}">{{ file }}</a></li>
+            {% endfor %}
+        </ul>
+    {% else %}
+        <p>Nenašli sa žiadne výsledky v priečinku <code>results/</code>. Spusť najprv analýzu pomocou <code>example.py</code>.</p>
+    {% endif %}
+</body>
+</html>
