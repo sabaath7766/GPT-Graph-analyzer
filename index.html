@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<html lang="sk">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Graph Analyzer</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = { darkMode: 'class' }
+    </script>
+    <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <style>
+        .modal-content::-webkit-scrollbar { width: 8px; }
+        .modal-content::-webkit-scrollbar-track { background: #f1f1f1; border-radius: 10px; }
+        .modal-content::-webkit-scrollbar-thumb { background: #888; border-radius: 10px; }
+        .dark .modal-content::-webkit-scrollbar-track { background: #1e293b; }
+        .dark .modal-content::-webkit-scrollbar-thumb { background: #64748b; }
+        .line-clamp-3 {
+            overflow: hidden;
+            display: -webkit-box;
+            -webkit-box-orient: vertical;
+            -webkit-line-clamp: 3;
+        }
+    </style>
+</head>
+<body class="bg-gray-100 dark:bg-gray-900 transition-colors duration-500">
+    <div id="root"></div>
+
+    <script type="text/babel">
+    const { useState, useEffect, useMemo } = React;
+
+    const OriginalResponses = ({ responses }) => {
+        if (!responses || responses.length === 0) return null;
+        return (
+            <div className="mt-4">
+                <h4 className="text-lg font-semibold text-gray-700 dark:text-gray-300 mb-2">Pôvodné AI Odpovede</h4>
+                <div className="space-y-3">
+                    {responses.map((resp, index) => (
+                        <div key={index} className="bg-gray-100 dark:bg-gray-800 p-3 rounded-lg border dark:border-gray-700">
+                            <p className="text-sm text-gray-600 dark:text-gray-400">
+                                <span className="font-bold">Odpoveď #{index + 1}:</span> {resp}
+                            </p>
+                        </div>
+                    ))}
+                </div>
+            </div>
+        );
+    };
+
+    const FullGraphModal = ({ onClose, graphImage }) => {
+        if (!graphImage) return null;
+        return (
+            <div className="fixed inset-0 bg-black bg-opacity-60 flex items-center justify-center p-4 z-50" onClick={onClose}>
+                <div className="bg-white dark:bg-gray-800 rounded-xl shadow-2xl p-6 w-full max-w-6xl relative my-8 max-h-[90vh] overflow-y-auto modal-content" onClick={(e) => e.stopPropagation()}>
+                    <button onClick={onClose} className="absolute top-4 right-4 text-gray-400 hover:text-gray-800 dark:hover:text-gray-200 text-3xl">&times;</button>
+                    <h2 className="text-3xl font-bold text-gray-800 dark:text-gray-100 mb-4">Vizualizácia Kompletného Grafu</h2>
+                    <p className="text-gray-600 dark:text-gray-400 mb-4">Zobrazenie grafu vygenerované pomocou fyzikálnej simulácie pre optimálne rozloženie.</p>
+                    {graphImage ? (
+                        <div className="bg-gray-100 dark:bg-gray-900 p-4 rounded-lg flex justify-center border dark:border-gray-700">
+                            <img src={graphImage} alt="Full Graph Visualization" className="max-w-full h-auto" />
+                        </div>
+                    ) : (
+                        <div className="text-center text-gray-500 py-8">Obrázok grafu nie je dostupný.</div>
+                    )}
+                </div>
+            </div>
+        );
+    };
+
+    const App = () => {
+        // --- Stavy ---
+        const [analysisFiles, setAnalysisFiles] = useState([]);
+        const [selectedFile, setSelectedFile] = useState('');
+        const [currentAnalysisData, setCurrentAnalysisData] = useState(null);
+        const [selectedSubgraph, setSelectedSubgraph] = useState(null);
+        const [filters, setFilters] = useState({});
+        const [counts, setCounts] = useState({});
+        const [loading, setLoading] = useState(true);
+        const [error, setError] = useState(null);
+        const [isDarkMode, setIsDarkMode] = useState(() => window.matchMedia('(prefers-color-scheme: dark)').matches);
+        const [showFullGraph, setShowFullGraph] = useState(false);
+        const [isAttributeFilterOpen, setIsAttributeFilterOpen] = useState(false);
+
+        // --- Efekty ---
+        useEffect(() => {
+            document.documentElement.classList.toggle('dark', isDarkMode);
+        }, [isDarkMode]);
+
+        useEffect(() => {
+            const fetchAnalysisFiles = async () => {
+                try {
+                    setLoading(true);
+                    const response = await fetch('http://127.0.0.1:5000/api/analyses');
+                    if (!response.ok) throw new Error('Nepodarilo sa načítať zoznam analýz.');
+                    const files = await response.json();
+                    setAnalysisFiles(files);
+                    if (files.length > 0) {
+                        setSelectedFile(files[0]);
+                    }
+                } catch (err) {
+                    setError(`Nemôžem načítať zoznam analýz. Beží server? Chyba: ${err.message}`);
+                } finally {
+                    setLoading(false);
+                }
+            };
+            fetchAnalysisFiles();
+        }, []);
+
+        useEffect(() => {
+            if (!selectedFile) return;
+            const fetchData = async () => {
+                try {
+                    setLoading(true);
+                    setError(null);
+                    setCurrentAnalysisData(null);
+                    const response = await fetch(`http://127.0.0.1:5000/api/analysis/${selectedFile}`);
+                    if (!response.ok) throw new Error(`Nepodarilo sa načítať '${selectedFile}'`);
+                    const data = await response.json();
+                    setCurrentAnalysisData(data);
+
+                    const initialFilters = { claw: false, clique_3: false, clique_4: false, clique_5: false };
+                    if (data.metadata?.attribute_descriptions) {
+                        Object.keys(data.metadata.attribute_descriptions).forEach(attr => { initialFilters[attr] = false; });
+                    }
+                    setFilters(initialFilters);
+                } catch (err) {
+                    setError(err.message);
+                    setCurrentAnalysisData(null);
+                } finally {
+                    setLoading(false);
+                }
+            };
+            fetchData();
+        }, [selectedFile]);
+
+        // --- Logika filtrovania (presne podľa tvojho príkladu) ---
+        const analyses = currentAnalysisData ? currentAnalysisData.analyses : [];
+        const attributeMetadata = currentAnalysisData?.metadata?.attribute_descriptions || {};
+
+        const allAnalysesCount = useMemo(() => {
+            const initialCounts = { claw: 0, clique_3: 0, clique_4: 0, clique_5: 0 };
+            analyses.forEach(analysis => {
+                if (analysis.subgraph_type === 'claw') initialCounts.claw++;
+                else if (analysis.subgraph_type === 'clique') {
+                    const nodeCount = analysis.nodes_data.length;
+                    if (nodeCount === 3) initialCounts.clique_3++;
+                    if (nodeCount === 4) initialCounts.clique_4++;
+                    if (nodeCount === 5) initialCounts.clique_5++;
+                }
+            });
+            return initialCounts;
+        }, [analyses]);
+
+        const filteredAnalyses = useMemo(() => {
+            const activeStructureFilters = ['claw', 'clique_3', 'clique_4', 'clique_5'].filter(key => filters[key]);
+            const activeAttributeFilters = Object.keys(attributeMetadata).filter(key => filters[key]);
+
+            if (activeStructureFilters.length === 0 && activeAttributeFilters.length === 0) {
+                return analyses;
+            }
+
+            return analyses.filter(analysis => {
+                const matchesStructure = activeStructureFilters.length === 0 || activeStructureFilters.some(filterType => {
+                    if (filterType === 'claw' && analysis.subgraph_type === 'claw') return true;
+                    if (filterType.startsWith('clique_') && analysis.subgraph_type === 'clique') {
+                        const cliqueSize = parseInt(filterType.split('_')[1], 10);
+                        return analysis.nodes_data.length === cliqueSize;
+                    }
+                    return false;
+                });
+
+                const matchesAttributes = activeAttributeFilters.length === 0 || activeAttributeFilters.every(attr => analysis.attributes.hasOwnProperty(attr));
+
+                return matchesStructure && matchesAttributes;
+            });
+        }, [analyses, filters, attributeMetadata]);
+
+        useEffect(() => {
+            const newCounts = {};
+            Object.keys(attributeMetadata).forEach(attr => {
+                newCounts[attr] = 0;
+            });
+            filteredAnalyses.forEach(analysis => {
+                 Object.keys(analysis.attributes).forEach(attr => {
+                    if (newCounts.hasOwnProperty(attr)) {
+                        newCounts[attr]++;
+                    }
+                });
+            });
+            setCounts(newCounts);
+        }, [filteredAnalyses, attributeMetadata]);
+
+        const handleFilterChange = (e) => {
+            const { name, checked } = e.target;
+            setFilters(prev => ({ ...prev, [name]: checked }));
+        };
+
+        const structureFilters = [
+            { name: "claw", label: "Claw" },
+            { name: "clique_3", label: "3-Node Clique" },
+            { name: "clique_4", label: "4-Node Clique" },
+            { name: "clique_5", label: "5-Node Clique" }
+        ];
+
+        if (error) return <div className="flex items-center justify-center min-h-screen p-4"><div className="bg-red-100 dark:bg-red-900 border border-red-400 text-red-700 dark:text-red-300 px-4 py-3 rounded-lg text-center max-w-2xl"><strong className="font-bold">Chyba:</strong><span className="block sm:inline ml-2">{error}</span></div></div>;
+
+        return (
+            <div className="min-h-screen bg-gray-100 dark:bg-gray-900 p-4 sm:p-6 font-sans flex flex-col items-center transition-colors">
+                <header className="w-full max-w-6xl text-center mb-6 relative">
+                     <h1 className="text-4xl font-bold text-gray-800 dark:text-gray-100 mb-2">Graph Analyzer</h1>
+                    <p className="text-lg text-gray-600 dark:text-gray-400">Preskúmajte korelácie atribútov analyzované lokálnym LLM.</p>
+                     <button onClick={() => setIsDarkMode(!isDarkMode)} className="absolute top-0 right-0 p-2 rounded-full text-gray-500 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-700">
+                        <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">{isDarkMode ? (<path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z" />) : (<path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z" />)}</svg>
+                    </button>
+                </header>
+
+                <div className="w-full max-w-6xl bg-white dark:bg-gray-800 rounded-xl shadow-lg p-6 mb-8">
+                    <label htmlFor="analysis-selector" className="block text-lg font-semibold text-gray-700 dark:text-gray-200 mb-2">Vybrať výsledok analýzy</label>
+                    <div className="flex flex-col sm:flex-row space-y-2 sm:space-y-0 sm:space-x-4">
+                        <select
+                            id="analysis-selector"
+                            value={selectedFile}
+                            onChange={(e) => setSelectedFile(e.target.value)}
+                            className="block w-full py-1.5 px-2 text-sm text-gray-900 bg-gray-50 rounded-lg border border-gray-300 focus:ring-blue-500 focus:border-blue-500 dark:bg-gray-700 dark:border-gray-600 dark:placeholder-gray-400 dark:text-white"
+                            disabled={loading || analysisFiles.length === 0}
+                        >
+                            {analysisFiles.length === 0 ? <option>Nenašli sa analýzy...</option> : analysisFiles.map(file => <option key={file} value={file}>{file}</option>)}
+                        </select>
+                        <button onClick={() => setShowFullGraph(true)} disabled={loading || !currentAnalysisData} className="px-5 py-2 text-white bg-indigo-600 rounded-lg hover:bg-indigo-700 disabled:bg-indigo-300 disabled:cursor-not-allowed whitespace-nowrap">Zobraziť celý graf</button>
+                    </div>
+                </div>
+
+                {loading && <div className="text-xl text-gray-700 dark:text-gray-300 animate-pulse my-8">Načítavam dáta analýzy '{selectedFile}'...</div>}
+
+                {currentAnalysisData && !loading && (
+                    <>
+                        <div className="w-full max-w-6xl bg-white dark:bg-gray-800 rounded-xl shadow-lg p-6 mb-8 transition-colors">
+                            <h2 className="text-2xl font-semibold text-gray-700 dark:text-gray-200 mb-4">Filter by Structure Type</h2>
+                            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-4">
+                                {structureFilters.map(({ name, label }) => {
+                                    const count = allAnalysesCount[name] || 0;
+                                    const isChecked = filters[name] || false;
+                                    const isDisabled = !isChecked && count === 0;
+                                    return (
+                                        <label key={name} className={`flex items-center p-2 rounded-lg transition-colors ${isDisabled ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer bg-gray-50 dark:bg-gray-700 hover:bg-gray-200 dark:hover:bg-gray-600'}`}>
+                                            <input type="checkbox" name={name} checked={isChecked} onChange={handleFilterChange} disabled={isDisabled} className="form-checkbox h-5 w-5 text-indigo-600 rounded focus:ring-indigo-500 disabled:bg-gray-300 dark:disabled:bg-gray-500"/>
+                                            <span className="ml-2 text-gray-800 dark:text-gray-100 text-sm font-medium">{label} ({count})</span>
+                                        </label>
+                                    );
+                                })}
+                            </div>
+                        </div>
+
+                        <div className="w-full max-w-6xl bg-white dark:bg-gray-800 rounded-xl shadow-lg p-6 mb-8 transition-colors">
+                            <div className="flex justify-between items-center cursor-pointer" onClick={() => setIsAttributeFilterOpen(!isAttributeFilterOpen)}>
+                                <h2 className="text-2xl font-semibold text-gray-700 dark:text-gray-200">Filter by Attribute</h2>
+                                <svg xmlns="http://www.w3.org/2000/svg" className={`h-6 w-6 text-gray-500 dark:text-gray-400 transform transition-transform duration-300 ${isAttributeFilterOpen ? 'rotate-180' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" /></svg>
+                            </div>
+                            <div className={`mt-4 overflow-hidden transition-all duration-300 ease-in-out ${isAttributeFilterOpen ? 'max-h-96' : 'max-h-0'}`}>
+                                <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-4">
+                                    {Object.keys(attributeMetadata).sort().map((attrName) => {
+                                        const count = counts[attrName] || 0;
+                                        const isChecked = filters[attrName] || false;
+                                        const isDisabled = !isChecked && count === 0;
+                                        return (
+                                            <label key={attrName} className={`flex items-center p-2 rounded-lg transition-colors ${isDisabled ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer bg-gray-50 dark:bg-gray-700 hover:bg-gray-200 dark:hover:bg-gray-600'}`}>
+                                                <input type="checkbox" name={attrName} checked={isChecked} onChange={handleFilterChange} disabled={isDisabled} className="form-checkbox h-5 w-5 text-indigo-600 rounded focus:ring-indigo-500 disabled:bg-gray-300 dark:disabled:bg-gray-500"/>
+                                                <span className="ml-2 text-gray-800 dark:text-gray-100 text-sm font-medium">{attrName} ({count})</span>
+                                            </label>
+                                        );
+                                    })}
+                                </div>
+                            </div>
+                        </div>
+
+                        <main className="w-full max-w-6xl">
+                             <p className="text-center mb-6 text-gray-600 dark:text-gray-400">
+                                Zobrazuje sa <span className="font-bold text-indigo-500">{filteredAnalyses.length}</span> z <span className="font-bold">{analyses.length}</span> celkových podgrafov.
+                            </p>
+                            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                                {filteredAnalyses.length > 0 ? filteredAnalyses.map((analysis, index) => (
+                                    <div key={index} onClick={() => setSelectedSubgraph(analysis)} className="bg-white dark:bg-gray-800 rounded-lg shadow-md hover:shadow-xl hover:-translate-y-1 transition-all duration-300 cursor-pointer overflow-hidden">
+                                        <div className="p-5">
+                                            <h3 className="text-xl font-bold text-gray-800 dark:text-gray-100 mb-2 capitalize">{analysis.subgraph_type}: {analysis.nodes_data.join(', ')}</h3>
+                                            <p className="text-gray-600 dark:text-gray-400 text-sm h-20 line-clamp-3">{analysis.synthesized_analysis}</p>
+                                        </div>
+                                        {analysis.visualization_b64 && <img src={analysis.visualization_b64} alt="Subgraph visualization" className="w-full h-48 object-contain bg-gray-50 dark:bg-gray-700 p-2"/>}
+                                    </div>
+                                )) : (
+                                    <div className="col-span-full text-center py-12">
+                                        <p className="text-gray-500 dark:text-gray-400">Vašim filtrom nezodpovedajú žiadne výsledky.</p>
+                                    </div>
+                                )}
+                            </div>
+                        </main>
+                    </>
+                )}
+
+                {showFullGraph && <FullGraphModal onClose={() => setShowFullGraph(false)} graphImage={currentAnalysisData?.full_graph_visualization_b64} />}
+
+                {selectedSubgraph && (
+                     <div className="fixed inset-0 bg-black bg-opacity-60 flex items-center justify-center p-4 z-50" onClick={() => setSelectedSubgraph(null)}>
+                        <div className="bg-white dark:bg-gray-800 rounded-xl shadow-2xl p-6 w-full max-w-3xl relative my-8 max-h-[90vh] overflow-y-auto modal-content" onClick={(e) => e.stopPropagation()}>
+                            <button onClick={() => setSelectedSubgraph(null)} className="absolute top-4 right-4 text-gray-400 hover:text-gray-800 dark:hover:text-gray-200 text-3xl">&times;</button>
+                            <h2 className="text-2xl font-bold text-gray-800 dark:text-gray-100 mb-4 capitalize">{selectedSubgraph.subgraph_type}: {selectedSubgraph.nodes_data.join(', ')}</h2>
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                <div className="bg-gray-50 dark:bg-gray-900 p-4 rounded-lg">
+                                    <h3 className="text-xl font-semibold text-gray-700 dark:text-gray-200 mb-3">Atribúty a ich popisy</h3>
+                                    <ul className="space-y-2">
+                                        {Object.entries(selectedSubgraph.attributes).map(([attr, desc]) => (
+                                            <li key={attr}><strong className="text-gray-800 dark:text-gray-100">{attr}:</strong> <span className="text-gray-600 dark:text-gray-400">{desc}</span></li>
+                                        ))}
+                                    </ul>
+                                </div>
+                                <div className="bg-gray-50 dark:bg-gray-900 p-4 rounded-lg flex items-center justify-center">
+                                    {selectedSubgraph.visualization_b64 ?
+                                        <img src={selectedSubgraph.visualization_b64} alt="Subgraph visualization" /> :
+                                        <p className="text-gray-500">Vizualizácia nie je k dispozícii.</p>
+                                    }
+                                </div>
+                            </div>
+                            <div className="mt-6">
+                                <h3 className="text-xl font-semibold text-gray-700 dark:text-gray-200 mb-3">Finálna LLM Analýza</h3>
+                                <p className="text-gray-700 dark:text-gray-300 leading-relaxed bg-blue-50 dark:bg-blue-900/20 p-4 rounded-lg border-l-4 border-blue-500">{selectedSubgraph.synthesized_analysis}</p>
+                            </div>
+                             <OriginalResponses responses={selectedSubgraph.original_responses} />
+                        </div>
+                    </div>
+                )}
+            </div>
+        );
+    };
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+    </script>
+</body>
+</html>
