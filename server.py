@@ -1,43 +1,61 @@
-from flask import Flask, render_template, abort
+from flask import Flask, jsonify, send_from_directory, abort
+from flask_cors import CORS
 import os
 import json
-import networkx as nx
-
-# Pomocný modul pre vizualizácie
-import graph_analyzer
+from pathlib import Path
 
 app = Flask(__name__)
-RESULTS_DIR = "results"
+CORS(app)  # Povolí Cross-Origin Resource Sharing pre jednoduchý vývoj
+
+RESULTS_DIR = Path("results")
+
 
 @app.route('/')
 def index():
-    """Zobrazí zoznam dostupných JSON analýz v priečinku /results."""
+    """Servuje hlavnú stránku index.html."""
+    return send_from_directory('.', 'index.html')
+
+
+@app.route('/api/analyses')
+def list_analyses():
+    """Vráti zoznam dostupných JSON súborov s analýzami v priečinku 'results'."""
+    if not RESULTS_DIR.exists():
+        return jsonify([])
+
     try:
-        files = [f for f in os.listdir(RESULTS_DIR) if f.endswith('.json')]
-        return render_template('index.html', files=sorted(files))
-    except FileNotFoundError:
-        return "Priečinok 'results' nebol nájdený.", 404
+        json_files = sorted(
+            [f.name for f in RESULTS_DIR.iterdir() if f.is_file() and f.suffix == '.json'],
+            reverse=True  # Najnovšie analýzy budú prvé
+        )
+        return jsonify(json_files)
+    except Exception as e:
+        return jsonify({"error": f"Failed to list analysis files: {e}"}), 500
 
-@app.route('/analysis/<filename>')
-def analysis_detail(filename):
-    """Načíta a zobrazí detailnú analýzu z konkrétneho JSON súboru."""
-    filepath = os.path.join(RESULTS_DIR, filename)
-    if not os.path.exists(filepath):
-        return abort(404)
 
-    with open(filepath, 'r', encoding='utf-8') as f:
-        data = json.load(f)
+@app.route('/api/analysis/<string:filename>')
+def get_analysis_data(filename):
+    """Načíta a vráti obsah konkrétneho JSON súboru s analýzou."""
+    # Bezpečnostné opatrenie: zabráni prístupu k súborom mimo priečinka 'results'
+    if '..' in filename or filename.startswith('/'):
+        abort(400, "Invalid filename.")
 
-    # Dynamické generovanie vizualizácií pre jednotlivé podgrafy
-    # (Toto sa nerobí vopred, ale až pri zobrazení, aby JSON súbory zostali čisté)
-    # V tomto príklade to preskočíme, aby sme nekomplikovali kód,
-    # ale pridáme placeholder. V reálnej aplikácii by tu bol kód na generovanie.
-    for analysis in data.get("llm_analyses", []):
-        # Na jednoduchosť pridáme placeholder, v praxi by sme tu volali
-        # graph_analyzer.create_single_clique_viz_base64 atď.
-        analysis["visualization_base64"] = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7" # Priehľadný pixel
+    file_path = RESULTS_DIR / filename
 
-    return render_template('analysis_detail.html', data=data, filename=filename)
+    if not file_path.exists():
+        abort(404, f"Analysis file '{filename}' not found.")
+
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        return jsonify(data)
+    except Exception as e:
+        return jsonify({"error": f"Failed to read or parse analysis file: {e}"}), 500
+
 
 if __name__ == '__main__':
+    print("=" * 50)
+    print("Spúšťam Flask server...")
+    print(f"Výsledky sa budú načítavať z priečinka: '{RESULTS_DIR.resolve()}'")
+    print("Po spustení servera otvorte v prehliadači súbor 'index.html' alebo adresu http://127.0.0.1:5000")
+    print("=" * 50)
     app.run(debug=True)

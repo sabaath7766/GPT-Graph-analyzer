@@ -1,19 +1,24 @@
-# llm_logic.py
-
-
+# Súbor: llm_logic.py
 from llama_cpp import Llama
 import os
 
-# Načítanie modelu zostáva bez zmeny
+# CESTA K MODELU ZOSTÁVA, ALE SAMOTNÉ NAČÍTANIE PRESUNIEME
 MODEL_PATH = "./models/mistral-7b-instruct-v0.2.Q4_K_M.gguf"
 if not os.path.exists(MODEL_PATH):
     raise FileNotFoundError(f"Model nebol nájdený na ceste: {MODEL_PATH}.")
-llm = Llama(model_path=MODEL_PATH, n_ctx=2048, n_gpu_layers=-1, verbose=False)
 
 
+def load_llm_model():
+    """Načíta a vráti inštanciu LLM modelu. Táto funkcia sa volá v každom worker procese."""
+    print(f"[Proces {os.getpid()}] Načítavam LLM model...")
+    llm = Llama(model_path=MODEL_PATH, n_ctx=2048, n_gpu_layers=-1, verbose=False)
+    print(f"[Proces {os.getpid()}] LLM model úspešne načítaný.")
+    return llm
+
+
+# Funkcie create_analysis_prompt a create_synthesis_prompt zostávajú bez zmeny
 def create_analysis_prompt(subgraph_nodes: list, descriptions: dict, subgraph_type: str) -> str:
-    # Táto funkcia je už v poriadku a zostáva bez zmeny
-    prompt_parts = [f"- **{node}**: {descriptions.get(node, 'No description available.')}" for node in subgraph_nodes]
+    prompt_parts = [f"- {node}: {descriptions.get(node, 'No description available.')}" for node in subgraph_nodes]
     description_text = "\n".join(prompt_parts)
     if subgraph_type == 'clique':
         context_description = "The following attributes exhibit a special relationship: every attribute in this group is strongly and directly correlated with every other attribute."
@@ -28,6 +33,7 @@ def create_analysis_prompt(subgraph_nodes: list, descriptions: dict, subgraph_ty
         context_description = "Analyze the relationship between the following attributes."
         question = "Is there a likely connection?"
         instructions = "You MUST start your answer with 'Yes,' or 'No,' followed by a brief explanation."
+
     prompt = f"""
 Context: {context_description}
 Attributes:
@@ -39,9 +45,11 @@ Answer:"""
 
 
 def create_synthesis_prompt(original_question: str, answers: list) -> str:
+    # ... kód zostáva rovnaký ...
     answer_text = ""
     for i, ans in enumerate(answers):
         answer_text += f"Answer #{i + 1}:\n\"{ans}\"\n\n"
+
     prompt = f"""
 The original question was: "{original_question}"
 I received the following three independent answers from an AI assistant:
@@ -51,12 +59,14 @@ Final Synthesized Conclusion:"""
     return prompt
 
 
-def get_synthesized_answer(subgraph_nodes: list, descriptions: dict, subgraph_type: str, retries: int = 3) -> tuple:
+def get_synthesized_answer(llm_instance, subgraph_nodes: list, descriptions: dict, subgraph_type: str,
+                           retries: int = 3) -> tuple:
+    # PRIDALI SME llm_instance AKO PRVÝ PARAMETER
     initial_prompt = create_analysis_prompt(subgraph_nodes, descriptions, subgraph_type)
-    initial_responses = []
 
+    initial_responses = []
     for _ in range(retries):
-        output = llm(initial_prompt, max_tokens=1024, echo=False)
+        output = llm_instance(initial_prompt, max_tokens=1024, echo=False)
         response_text = output['choices'][0]['text'].strip()
         initial_responses.append(response_text)
 
@@ -64,17 +74,11 @@ def get_synthesized_answer(subgraph_nodes: list, descriptions: dict, subgraph_ty
         return "Model did not provide any initial answers.", initial_responses
 
     synthesis_prompt = create_synthesis_prompt(
-        original_question=f"Is there a connection between the attributes {', '.join(subgraph_nodes)}? "
-                          f"Start the sentence with a Yes or No.",
+        original_question=f"Is there a connection between the attributes {', '.join(subgraph_nodes)}? Start the sentence with a Yes or No.",
         answers=initial_responses
     )
 
-    # Model teraz bude generovať, kým neskončí alebo nenarazí na vysoký limit tokenov.
-    final_output = llm(
-        synthesis_prompt,
-        max_tokens=2048,  # Ponechávame vysoký limit
-        echo=False
-    )
+    final_output = llm_instance(synthesis_prompt, max_tokens=2048, echo=False)
     final_answer = final_output['choices'][0]['text'].strip()
 
     return final_answer, initial_responses
