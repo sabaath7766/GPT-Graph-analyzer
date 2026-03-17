@@ -1,1 +1,6 @@
 /models/mistral-7b-instruct-v0.2.Q4_K_M.gguf
+.DS_Store
+.idea/
+adhoc.py
+adhoc.tex
+*.png
