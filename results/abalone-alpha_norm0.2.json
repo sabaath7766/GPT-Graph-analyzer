@@ -1,0 +1,155 @@
+{
+  "metadata": {
+    "dataset_name": "abalone",
+    "csv_path": "datasets/abalone.csv",
+    "descriptions_path": "datasets/abalone_descriptions.json",
+    "alpha_internal": 0.06,
+    "alpha_normalized": 0.2,
+    "total_analyses_found": 1,
+    "total_analyses_processed": 1,
+    "timed_out": false,
+    "attribute_descriptions": {
+      "Sex": "Gender of the abalone. Categorical data: M (male), F (female), and I (infant). This column will be ignored by the correlation analysis.",
+      "Length": "The longest measurement of the abalone shell, in millimeters (mm).",
+      "Diameter": "The measurement of the abalone shell perpendicular to its length, in millimeters (mm).",
+      "Height": "The height of the abalone shell including the meat, in millimeters (mm).",
+      "Whole_weight": "The total weight of the entire abalone, in grams.",
+      "Shucked_weight": "The weight of the abalone meat only, after being removed from the shell, in grams.",
+      "Viscera_weight": "The weight of the gut (internal organs) after bleeding, in grams.",
+      "Shell_weight": "The weight of the abalone shell after it has been dried, in grams.",
+      "Rings": "The number of rings on the shell. The actual age of the abalone in years is determined by adding 1.5 to this number. This is the primary target variable for age prediction."
+    }
+  },
+  "full_graph_cytoscape_data": {
+    "nodes": [
+      {
+        "data": {
+          "id": "dlzka"
+        }
+      },
+      {
+        "data": {
+          "id": "diameter"
+        }
+      },
+      {
+        "data": {
+          "id": "hmot_cely"
+        }
+      },
+      {
+        "data": {
+          "id": "hmot_bez_musle"
+        }
+      },
+      {
+        "data": {
+          "id": "hmot_vnut"
+        }
+      },
+      {
+        "data": {
+          "id": "hmot_musle"
+        }
+      }
+    ],
+    "edges": [
+      {
+        "data": {
+          "source": "dlzka",
+          "target": "diameter",
+          "weight": 0.9868115846025
+        }
+      },
+      {
+        "data": {
+          "source": "hmot_cely",
+          "target": "hmot_bez_musle",
+          "weight": 0.969405456703434
+        }
+      },
+      {
+        "data": {
+          "source": "hmot_cely",
+          "target": "hmot_vnut",
+          "weight": 0.9663750782730317
+        }
+      },
+      {
+        "data": {
+          "source": "hmot_cely",
+          "target": "hmot_musle",
+          "weight": 0.9553554421763288
+        }
+      }
+    ]
+  },
+  "analyses": [
+    {
+      "subgraph_type": "claw",
+      "nodes_data": [
+        "hmot_cely",
+        "hmot_bez_musle",
+        "hmot_vnut",
+        "hmot_musle"
+      ],
+      "synthesized_analysis": "Yes, the central attribute 'hmot_cely' plays a causal or influential role in determining the values of the leaf attributes 'hmot_bez_musle', 'hmot_vnut', and 'hmot_musle'. Each of these leaf attributes is strongly correlated with 'hmot_cely', but not strongly correlated with each other, suggesting that the relationship between them is primarily driven by the central node. This hub-and-spoke model is a common representation of causal relationships in data analysis, where the central node acts as the cause and the leaf nodes represent the effects or outcomes.",
+      "original_responses": [
+        "Yes, 'hmot_cely' is a central attribute that is strongly correlated with each of the leaf attributes, suggesting a causal or influential role. The fact that the leaf attributes are not strongly correlated with each other, while being strongly correlated with the central node, further supports this interpretation. This relationship is commonly referred to as a 'hub-and-spoke' model, where the central node 'hmot_cely' acts as the driver or cause, and the leaf nodes 'hmot_bez_musle', 'hmot_vnut', and 'hmot_musle' represent the effects or outcomes.",
+        "Yes, based on the information provided, the central node 'hmot_cely' appears to be acting as a driver or a central attribute that is influencing or causing changes in the leaf attributes 'hmot_bez_musle', 'hmot_vnut', and 'hmot_musle'. The strong correlation between 'hmot_cely' and each of the leaf attributes suggests that the value of the leaf attributes may depend on the value of the central attribute. However, the lack of strong correlation between the leaf attributes indicates that they may be influenced by other factors independent of each other.",
+        "Yes, 'hmot_cely' is likely acting as a driver or central node in this 'hub-and-spoke' relationship, given its strong correlation with each of the 'leaf' attributes, hmot_bez_musle, hmot_vnut, and hmot_musle. While the leaf attributes may not be strongly correlated with each other, they all depend on the value of the central node. This suggests a clear causal or influential relationship between 'hmot_cely' and the leaf attributes."
+      ],
+      "visualization_b64": null,
+      "cytoscape_data": {
+        "nodes": [
+          {
+            "data": {
+              "id": "hmot_cely"
+            }
+          },
+          {
+            "data": {
+              "id": "hmot_bez_musle"
+            }
+          },
+          {
+            "data": {
+              "id": "hmot_vnut"
+            }
+          },
+          {
+            "data": {
+              "id": "hmot_musle"
+            }
+          }
+        ],
+        "edges": [
+          {
+            "data": {
+              "source": "hmot_cely",
+              "target": "hmot_bez_musle"
+            }
+          },
+          {
+            "data": {
+              "source": "hmot_cely",
+              "target": "hmot_vnut"
+            }
+          },
+          {
+            "data": {
+              "source": "hmot_cely",
+              "target": "hmot_musle"
+            }
+          }
+        ]
+      },
+      "attributes": {
+        "hmot_cely": "No description.",
+        "hmot_bez_musle": "No description.",
+        "hmot_vnut": "No description.",
+        "hmot_musle": "No description."
+      }
+    }
+  ]
+}

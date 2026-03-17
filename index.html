@@ -2,406 +2,1141 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>GPT Graph Analyzer</title>
+    <meta content="width=device-width, initial-scale=1.0" name="viewport">
+    <title>Interactive Graph Analyzer</title>
     <script src="https://cdn.tailwindcss.com"></script>
-    <script>
-        tailwind.config = {
-            darkMode: 'class',
-        }
-    </script>
+    <script>tailwind.config = { darkMode: 'class' }</script>
     <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://unpkg.com/cytoscape/dist/cytoscape.min.js"></script>
+    <!-- html2canvas for modal screenshots -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.3.4/html2canvas.min.js"></script>
     <style>
-        /* Jednoduchý štýl pre scrollbar v modálnom okne */
         .modal-content::-webkit-scrollbar { width: 8px; }
-        .modal-content::-webkit-scrollbar-track { background: #f1f1f1; border-radius: 10px; }
-        .modal-content::-webkit-scrollbar-thumb { background: #888; border-radius: 10px; }
-        .modal-content::-webkit-scrollbar-thumb:hover { background: #555; }
+        .modal-content::-webkit-scrollbar-track { background: #f1f1f1; }
+        .modal-content::-webkit-scrollbar-thumb { background: #888; }
         .dark .modal-content::-webkit-scrollbar-track { background: #1e293b; }
         .dark .modal-content::-webkit-scrollbar-thumb { background: #64748b; }
-        .dark .modal-content::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+        .line-clamp-3 { overflow: hidden; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; }
+
+        /* Hide all screenshot/export buttons while any capture is in progress */
+        body.capturing .screenshot-btn { visibility: hidden; pointer-events: none; }
+
+        /* ── Full-width viewport scaling ───────────────────────────────────────
+           The page is designed at a base width of 1440px.
+           On any wider screen (Paparazzi, 4K, 5K, 10K…) we scale the entire
+           root element up proportionally so it always fills the full viewport
+           width while keeping the aspect ratio intact.
+           transform-origin: top left ensures scaling anchors to the top-left
+           corner so nothing is clipped.
+        ────────────────────────────────────────────────────────────────────── */
+        html, body {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            overflow-x: hidden;
+        }
+        #scale-root {
+            width: 1440px;
+            transform-origin: top left;
+        }
     </style>
+
+    <script>
+        // Apply and update the scale whenever the window resizes.
+        // scale = viewportWidth / designWidth
+        // This makes the page pixel-perfect at 1440px and scales proportionally
+        // on any wider display (4K, 5K, 10K, Paparazzi virtual screens, etc.)
+        (function() {
+            var DESIGN_WIDTH = 1440;
+
+            function applyScale() {
+                var el = document.getElementById('scale-root');
+                if (!el) return;
+                var scale = window.innerWidth / DESIGN_WIDTH;
+                el.style.transform = 'scale(' + scale + ')';
+                // scale-root is in normal flow at 1440px wide but the browser
+                // sees it as 1440px wide after transform — we need to tell the
+                // body the true rendered height so scrolling works correctly.
+                // offsetHeight is read after transform is applied so it reflects
+                // the 1440px natural height; multiply by scale for screen pixels.
+                var naturalH = el.offsetHeight;
+                document.body.style.height = Math.ceil(naturalH * scale) + 'px';
+            }
+
+            // Re-run whenever scale-root's content size changes (cards load, filters expand)
+            function observe() {
+                var el = document.getElementById('scale-root');
+                if (!el) return;
+                var ro = new ResizeObserver(applyScale);
+                ro.observe(el);
+            }
+
+            window.addEventListener('resize', applyScale);
+            document.addEventListener('DOMContentLoaded', function() {
+                applyScale();
+                observe();
+            });
+            if (document.readyState !== 'loading') {
+                setTimeout(function() { applyScale(); observe(); }, 0);
+            }
+        })();
+    </script>
 </head>
 <body class="bg-gray-100 dark:bg-gray-900 transition-colors duration-500">
-    <div id="root"></div>
+<div id="scale-root">
+<div id="root"></div>
+</div>
+<!-- Modals render here, outside scale-root, so CSS transform doesn't break fixed positioning -->
+<div id="modal-root"></div>
+<script type="text/babel">
+const { useState, useEffect, useMemo, useRef, useCallback, useImperativeHandle } = React;
 
-    <script type="text/babel">
-    const { useState, useEffect, useMemo } = React;
+// Renders children into #modal-root which lives outside #scale-root,
+// preventing CSS transform on scale-root from breaking fixed positioning.
+const Portal = ({ children }) => {
+    const el = useRef(document.getElementById('modal-root'));
+    return ReactDOM.createPortal(children, el.current);
+};
 
-    const OriginalResponses = ({ responses }) => {
-        if (!responses || responses.length === 0) return null;
-        return (
-            <div className="mt-4">
-                <h4 className="text-lg font-semibold text-gray-700 dark:text-gray-300 mb-2">Original AI Responses</h4>
-                <div className="space-y-3">
-                    {responses.map((resp, index) => (
-                        <div key={index} className="bg-gray-100 dark:bg-gray-800 p-3 rounded-lg border dark:border-gray-700">
-                            <p className="text-sm text-gray-600 dark:text-gray-400">
-                                <span className="font-bold">Response #{index + 1}:</span> {resp}
-                            </p>
-                        </div>
+// ─── Utilities ────────────────────────────────────────────────────────────────
+
+const downloadBlob = (blob, fileName) => {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = fileName;
+    a.click();
+    URL.revokeObjectURL(a.href);
+};
+
+const downloadFile = (content, fileName, contentType) => {
+    downloadBlob(new Blob([content], { type: contentType }), fileName);
+};
+
+/**
+ * Export a Cytoscape instance as a high-resolution PNG.
+ * We use cy.png() with a scale multiplier. At scale=4 the exported canvas is
+ * 4x the rendered pixel dimensions in each direction, giving ~4x the detail.
+ * The 'base64uri' output is a proper data-URI we can assign to <a href> directly.
+ */
+const exportCyPNG = (cy, filename, scale) => {
+    // fit() ensures all nodes are visible before export
+    cy.fit(undefined, 30);
+    // full:true renders the entire graph bounding box at the given scale,
+    // giving a high-res image regardless of current zoom/pan.
+    const dataUri = cy.png({ output: 'base64uri', scale: scale || 4, full: true, bg: '#ffffff' });
+    const a = document.createElement('a');
+    a.href = dataUri;
+    a.download = filename || 'graph.png';
+    a.click();
+};
+
+/**
+ * Extract the numeric correlation value from edge data.
+ * The tap handler now always constructs { source, target, weight } explicitly
+ * using Cytoscape's single-key getter, so this is a straightforward lookup.
+ */
+const getEdgeValue = (edgeData) => {
+    if (!edgeData) return null;
+    if (edgeData.weight !== undefined && edgeData.weight !== null) {
+        return { key: 'weight', value: edgeData.weight };
+    }
+    // Fallback: scan all numeric non-metadata keys
+    const skip = new Set(['id', 'source', 'target']);
+    for (const [k, v] of Object.entries(edgeData)) {
+        if (!skip.has(k) && typeof v === 'number') return { key: k, value: v };
+    }
+    return null;
+};
+
+/**
+ * Capture a DOM element with html2canvas at high resolution.
+ * To capture the FULL scrollable content (not just the visible viewport),
+ * we temporarily remove overflow constraints, measure the full scroll height,
+ * capture, then restore everything.
+ */
+const screenshotElement = async (el, filename, cy) => {
+    if (!el || !window.html2canvas) return;
+
+    // Snapshot current styles
+    const prev = {
+        overflow:  el.style.overflow,
+        maxHeight: el.style.maxHeight,
+        height:    el.style.height,
+        position:  el.style.position,
+    };
+
+    // Expand the live element to show full scrollable content
+    el.style.overflow  = 'visible';
+    el.style.maxHeight = 'none';
+    el.style.height    = 'auto';
+
+    // Two rAF ticks so the browser reflows and commits new dimensions
+    await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+
+    const fullW = el.scrollWidth;
+    const fullH = el.scrollHeight;
+
+    // If a Cytoscape instance is provided, resize + redraw its canvas
+    // so it fills the newly expanded container rather than showing blank.
+    if (cy) {
+        cy.resize();
+        cy.fit(undefined, 20);
+        // Wait for Cytoscape to finish rendering its canvas
+        await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+    }
+
+    try {
+        const canvas = await html2canvas(el, {
+            scale: 16,          // 16x → ~1536 DPI on 96-DPI screen
+            useCORS: true,
+            backgroundColor: '#ffffff',
+            logging: false,
+            width:        fullW,
+            height:       fullH,
+            windowWidth:  fullW,
+            windowHeight: fullH,
+            x: 0,
+            y: 0,
+        });
+        canvas.toBlob(blob => downloadBlob(blob, filename || 'screenshot.png'), 'image/png');
+    } finally {
+        // Restore original styles
+        el.style.overflow  = prev.overflow;
+        el.style.maxHeight = prev.maxHeight;
+        el.style.height    = prev.height;
+        el.style.position  = prev.position;
+
+        // Resize Cytoscape back to its original container size
+        if (cy) {
+            await new Promise(r => requestAnimationFrame(r));
+            cy.resize();
+            cy.fit(undefined, 20);
+        }
+    }
+};
+
+// ─── Custom Select ────────────────────────────────────────────────────────────
+const useOnClickOutside = (ref, handler) => {
+    useEffect(() => {
+        const listener = e => { if (!ref.current || ref.current.contains(e.target)) return; handler(e); };
+        document.addEventListener('mousedown', listener);
+        document.addEventListener('touchstart', listener);
+        return () => { document.removeEventListener('mousedown', listener); document.removeEventListener('touchstart', listener); };
+    }, [ref, handler]);
+};
+
+const CustomSelect = ({ options, selected, onSelect, placeholder = 'Select an option...' }) => {
+    const [isOpen, setIsOpen] = useState(false);
+    const ref = useRef(null);
+    useOnClickOutside(ref, () => setIsOpen(false));
+    return (
+        <div className="relative w-full" ref={ref}>
+            <button type="button"
+                className="relative w-full cursor-pointer rounded-lg bg-white dark:bg-gray-700 py-2 pl-3 pr-10 text-left shadow-sm ring-1 ring-inset ring-gray-300 dark:ring-gray-600 focus:outline-none focus:ring-2 focus:ring-indigo-600 sm:text-sm text-gray-900 dark:text-gray-100"
+                onClick={() => setIsOpen(!isOpen)}>
+                <span className="block truncate">{selected || placeholder}</span>
+                <span className="pointer-events-none absolute inset-y-0 right-0 flex items-center pr-2">
+                    <svg className="h-5 w-5 text-gray-400" viewBox="0 0 20 20" fill="currentColor">
+                        <path fillRule="evenodd" d="M10 3a.75.75 0 01.53.22l3.5 3.5a.75.75 0 01-1.06 1.06L10 4.81 7.03 7.78a.75.75 0 01-1.06-1.06l3.5-3.5A.75.75 0 0110 3zm-3.72 9.28a.75.75 0 011.06 0L10 15.19l2.97-2.91a.75.75 0 111.06 1.06l-3.5 3.5a.75.75 0 01-1.06 0l-3.5-3.5a.75.75 0 010-1.06z" clipRule="evenodd" />
+                    </svg>
+                </span>
+            </button>
+            {isOpen && (
+                <ul className="absolute z-10 mt-1 max-h-60 w-full overflow-auto rounded-md bg-white dark:bg-gray-700 py-1 text-base shadow-lg ring-1 ring-black ring-opacity-5 focus:outline-none sm:text-sm">
+                    {options.map(option => (
+                        <li key={option}
+                            className="text-gray-900 dark:text-gray-200 relative cursor-pointer select-none py-2 pl-3 pr-9 hover:bg-indigo-600 hover:text-white"
+                            onClick={() => { onSelect(option); setIsOpen(false); }}>
+                            <span className={`block truncate ${selected === option ? 'font-semibold' : 'font-normal'}`}>{option}</span>
+                        </li>
                     ))}
-                </div>
-            </div>
-        );
-    };
+                </ul>
+            )}
+        </div>
+    );
+};
 
-    const FullGraphModal = ({ onClose, onShow }) => {
-        const [graphImage, setGraphImage] = useState(null);
-        const [loading, setLoading] = useState(true);
-        const [error, setError] = useState(null);
+// ─── Node style factory (NO deprecated width/height:'label') ─────────────────
+const makeNodeStyle = (isPreview) => ({
+    'background-color': '#2B6CB0',
+    'label': 'data(id)',
+    'color': '#000000',
+    'text-valign': 'center',
+    'text-halign': 'center',
+    'font-size': isPreview ? '12px' : '11px',
+    'font-weight': 'bold',
+    'shape': 'round-rectangle',
+    // Explicit pixel dimensions instead of the deprecated string 'label'
+    'width': 90,
+    'height': 32,
+    'text-max-width': '82px',
+    'text-wrap': 'ellipsis',
+    'padding': isPreview ? '6px' : '8px',
+    'border-width': 2,
+    'border-color': '#EBF8FF',
+});
 
-        useEffect(() => {
-            const fetchFullGraph = async () => {
-                try {
-                    const response = await fetch('http://127.0.0.1:5000/api/full_graph');
-                    if (!response.ok) throw new Error('Failed to fetch full graph visualization.');
-                    const data = await response.json();
-                    setGraphImage(data.visualization_b64);
-                } catch (err) {
-                    console.error(err);
-                    setError(err.message);
-                    setGraphImage(null);
-                } finally {
-                    setLoading(false);
-                }
-            };
-            fetchFullGraph();
-        }, []);
+// ─── CytoscapeGraph component ─────────────────────────────────────────────────
+const CytoscapeGraph = React.forwardRef(({ graphData, attributeMetadata, isPreview = false, centralNodeId = null }, ref) => {
+    const domNodeRef = useRef(null);
+    const cyRef = useRef(null);
+    const [selectedNode, setSelectedNode] = useState(null);
+    const [selectedEdge, setSelectedEdge] = useState(null);
 
-        return (
-            <div className="fixed inset-0 bg-black bg-opacity-60 flex items-center justify-center p-4 z-50" onClick={onClose}>
-                <div className="bg-white dark:bg-gray-800 rounded-xl shadow-2xl p-6 w-full max-w-4xl relative my-8 max-h-[90vh] overflow-y-auto modal-content" onClick={(e) => e.stopPropagation()}>
-                    <button onClick={onClose} className="absolute top-4 right-4 text-gray-400 hover:text-gray-800 dark:hover:text-gray-200 text-3xl">&times;</button>
-                    <h2 className="text-3xl font-bold text-gray-800 dark:text-gray-100 mb-4">Complete Graph Visualization</h2>
-                    <p className="text-gray-600 dark:text-gray-400 mb-4">This shows the complete graph with all the nodes and their correlated edges.</p>
-                    {loading ? (
-                        <div className="flex items-center justify-center h-64">
-                            <p className="text-xl text-gray-700 dark:text-gray-300 animate-pulse">Loading graph...</p>
-                        </div>
-                    ) : error ? (
-                        <div className="text-center text-red-500 py-8">Error: {error}</div>
-                    ) : graphImage ? (
-                        <div className="bg-gray-100 dark:bg-gray-900 p-4 rounded-lg flex justify-center border dark:border-gray-700">
-                            <img src={graphImage} alt="Full Graph Visualization" className="max-w-full h-auto" />
-                        </div>
-                    ) : (
-                        <div className="text-center text-red-500 py-8">Failed to load graph image.</div>
-                    )}
-                </div>
-            </div>
-        );
-    };
+    // Keep a ref so cy event handlers always read the latest metadata
+    // without re-mounting the graph every time attributeMetadata changes.
+    const attrMetaRef = useRef(attributeMetadata);
+    useEffect(() => { attrMetaRef.current = attributeMetadata; }, [attributeMetadata]);
 
-    const App = () => {
-        const [analyses, setAnalyses] = useState([]);
-        const [selectedAnalysis, setSelectedAnalysis] = useState(null);
-        const [filters, setFilters] = useState({});
-        const [loading, setLoading] = useState(true);
-        const [error, setError] = useState(null);
-        const [attributeMetadata, setAttributeMetadata] = useState({});
-        const [counts, setCounts] = useState({});
-        const [isDarkMode, setIsDarkMode] = useState(
-            () => window.matchMedia('(prefers-color-scheme: dark)').matches || false
-        );
-        const [showFullGraph, setShowFullGraph] = useState(false);
-        const [isAttributeFilterOpen, setIsAttributeFilterOpen] = useState(false);
+    useImperativeHandle(ref, () => ({
+        exportPNG: (scale) => {
+            if (cyRef.current) exportCyPNG(cyRef.current, 'graph.png', scale || 4);
+        },
+        // Expose raw cy instance so parent components (e.g. screenshot handler)
+        // can call cy.resize() / cy.fit() directly.
+        getCy: () => cyRef.current,
+    }));
 
-        useEffect(() => {
-            if (isDarkMode) {
-                document.documentElement.classList.add('dark');
-            } else {
-                document.documentElement.classList.remove('dark');
-            }
-        }, [isDarkMode]);
+    useEffect(() => {
+        if (!domNodeRef.current || !graphData) return;
 
-        useEffect(() => {
-            const fetchData = async () => {
-                try {
-                    const metadataResponse = await fetch('http://127.0.0.1:5000/api/attribute_metadata');
-                    if (!metadataResponse.ok) throw new Error(`Metadata fetch failed: ${metadataResponse.statusText}`);
-                    const fetchedMetadata = await metadataResponse.json();
-                    setAttributeMetadata(fetchedMetadata);
-
-                    const initialFilters = {
-                        claw: false,
-                        clique_3: false,
-                        clique_4: false,
-                        clique_5: false
-                    };
-                    Object.keys(fetchedMetadata).forEach(attr => { initialFilters[attr] = false; });
-                    setFilters(initialFilters);
-
-                    const analysesResponse = await fetch('http://127.0.0.1:5000/api/analyses');
-                    if (!analysesResponse.ok) {
-                        const errorData = await analysesResponse.json().catch(() => null);
-                        throw new Error(errorData?.error || `Analyses fetch failed with status: ${analysesResponse.statusText}`);
-                    }
-                    const fetchedAnalyses = await analysesResponse.json();
-                    setAnalyses(fetchedAnalyses);
-
-                } catch (err) {
-                    setError(`Failed to load data from the backend. Reason: ${err.message}. Make sure the server is running and the analysis pipeline has been completed.`);
-                } finally {
-                    setLoading(false);
-                }
-            };
-            fetchData();
-        }, []);
-
-        const handleFilterChange = (e) => {
-            const { name, checked } = e.target;
-            setFilters(prev => ({ ...prev, [name]: checked }));
-        };
-
-        const allAnalysesCount = useMemo(() => {
-            const initialCounts = {
-                claw: 0, clique_3: 0, clique_4: 0, clique_5: 0
-            };
-            analyses.forEach(analysis => {
-                if (analysis.subgraph_type === 'claw') {
-                    initialCounts.claw++;
-                } else if (analysis.subgraph_type === 'clique') {
-                    const nodeCount = analysis.nodes_data.length;
-                    if (nodeCount === 3) initialCounts.clique_3++;
-                    if (nodeCount === 4) initialCounts.clique_4++;
-                    if (nodeCount === 5) initialCounts.clique_5++;
-                }
-            });
-            return initialCounts;
-        }, [analyses]);
-
-        const filteredAnalyses = useMemo(() => {
-            const activeStructureFilters = ['claw', 'clique_3', 'clique_4', 'clique_5'].filter(key => filters[key]);
-            const activeAttributeFilters = Object.keys(attributeMetadata).filter(key => filters[key]);
-
-            const matchesStructure = (analysis) => {
-                if (activeStructureFilters.length === 0) return true;
-                return activeStructureFilters.some(filterType => {
-                    if (filterType === 'claw' && analysis.subgraph_type === 'claw') {
-                        return true;
-                    }
-                    if (filterType.startsWith('clique_') && analysis.subgraph_type === 'clique') {
-                        const cliqueSize = parseInt(filterType.split('_')[1], 10);
-                        return analysis.nodes_data.length === cliqueSize;
-                    }
-                    return false;
-                });
-            };
-
-            const matchesAttributes = (analysis) => {
-                if (activeAttributeFilters.length === 0) return true;
-                return activeAttributeFilters.every(attr => analysis.attributes.hasOwnProperty(attr));
-            };
-
-            return analyses.filter(analysis => matchesStructure(analysis) && matchesAttributes(analysis));
-        }, [analyses, filters, attributeMetadata]);
-
-        useEffect(() => {
-            const newCounts = { ...allAnalysesCount };
-
-            const analysesToCountFrom = filteredAnalyses;
-
-            Object.keys(attributeMetadata).forEach(attr => {
-                newCounts[attr] = 0;
-            });
-
-            analysesToCountFrom.forEach(analysis => {
-                 Object.keys(analysis.attributes).forEach(attr => {
-                    if (newCounts.hasOwnProperty(attr)) {
-                        newCounts[attr]++;
-                    }
-                });
-            });
-
-            setCounts(newCounts);
-        }, [filteredAnalyses, allAnalysesCount, attributeMetadata]);
-
-        const handleCardClick = (analysis) => setSelectedAnalysis(analysis);
-        const closeModal = () => setSelectedAnalysis(null);
-        const closeFullGraphModal = () => setShowFullGraph(false);
-
-        const structureFilters = [
-            { name: "claw", label: "Claw" },
-            { name: "clique_3", label: "3-Node Clique" },
-            { name: "clique_4", label: "4-Node Clique" },
-            { name: "clique_5", label: "5-Node Clique" }
+        const style = [
+            { selector: 'node', style: makeNodeStyle(isPreview) },
+            { selector: 'edge', style: {
+                'width': 2,
+                'line-color': '#A0AEC0',
+                'target-arrow-shape': 'none',
+                'curve-style': 'bezier',
+            }},
+            { selector: 'node:selected', style: {
+                'background-color': '#F6E05E',
+                'border-color': '#D69E2E',
+                'color': '#000',
+            }},
+            { selector: 'edge:selected', style: {
+                'line-color': '#F6E05E',
+                'width': 4,
+            }},
         ];
 
-        const attributeFilters = Object.entries(attributeMetadata);
+        if (centralNodeId) {
+            style.push({
+                selector: `node[id = "${centralNodeId}"]`,
+                style: { 'background-color': '#E53E3E', 'border-color': '#C53030', 'border-width': 3 },
+            });
+        }
 
-        if (loading) return <div className="flex items-center justify-center min-h-screen font-sans bg-gray-100 dark:bg-gray-900 transition-colors"><p className="text-xl text-gray-700 dark:text-gray-300 animate-pulse">Loading analysis data...</p></div>;
-        if (error) return <div className="flex items-center justify-center min-h-screen font-sans p-4 bg-gray-100 dark:bg-gray-900"><div className="bg-red-100 dark:bg-red-900 border border-red-400 dark:border-red-700 text-red-700 dark:text-red-300 px-4 py-3 rounded-lg text-center"><strong className="font-bold">Error:</strong><span className="block sm:inline ml-2">{error}</span></div></div>;
+        const cy = cytoscape({
+            container: domNodeRef.current,
+            elements: graphData,
+            style,
+            pixelRatio: isPreview ? 2 : 4,
+            // Don't run layout here — we run it manually below so we can
+            // call cy.fit() AFTER layout stops, by which point the container
+            // will have its final dimensions.
+            layout: { name: 'preset' },
+            userZoomingEnabled: !isPreview,
+            userPanningEnabled: !isPreview,
+        });
 
-        return (
-            <div className="min-h-screen bg-gray-100 dark:bg-gray-900 p-4 sm:p-6 font-sans flex flex-col items-center transition-colors">
-                <header className="w-full max-w-6xl text-center mb-8 relative">
-                    <h1 className="text-4xl font-bold text-gray-800 dark:text-gray-100 mb-2">Graph Structure Analyzer</h1>
-                    <p className="text-lg text-gray-600 dark:text-gray-400">Explore attribute correlations analyzed by a local LLM.</p>
-                    <button onClick={() => setIsDarkMode(!isDarkMode)} className="absolute top-0 right-0 p-2 rounded-full text-gray-500 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors">
-                        <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                            {isDarkMode ? (
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z" />
-                            ) : (
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z" />
-                            )}
-                        </svg>
-                    </button>
-                </header>
+        cyRef.current = cy;
 
-                <div className="w-full max-w-6xl bg-white dark:bg-gray-800 rounded-xl shadow-lg p-6 mb-8 transition-colors">
-                    <h2 className="text-2xl font-semibold text-gray-700 dark:text-gray-200 mb-4">Filter by Structure Type</h2>
-                    <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-4">
-                        {structureFilters.map(({ name, label }) => {
-                            const count = allAnalysesCount[name] || 0;
-                            const isChecked = filters[name] || false;
-                            const isDisabled = !isChecked && count === 0 && !loading;
-                            return (
-                                <label key={name} className={`flex items-center p-2 rounded-lg transition-colors ${isDisabled ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer bg-gray-50 dark:bg-gray-700 hover:bg-gray-200 dark:hover:bg-gray-600'}`}>
-                                    <input
-                                        type="checkbox"
-                                        name={name}
-                                        checked={isChecked}
-                                        onChange={handleFilterChange}
-                                        disabled={isDisabled}
-                                        className="form-checkbox h-5 w-5 text-indigo-600 rounded focus:ring-indigo-500 disabled:bg-gray-300 dark:disabled:bg-gray-500"
-                                    />
-                                    <span className="ml-2 text-gray-800 dark:text-gray-100 text-sm font-medium">
-                                        {label} ({count})
-                                    </span>
-                                </label>
-                            );
-                        })}
-                    </div>
+        // Delay layout by two rAF ticks so the container has its final
+        // CSS dimensions before cose starts placing nodes. Without this,
+        // the layout sees a zero-height or wrongly-sized box and spreads
+        // nodes in a horizontal line.
+        const runLayout = () => {
+            cy.resize(); // force cytoscape to re-read container size
+            const layout = cy.layout({
+                name: 'cose',
+                idealEdgeLength: 100,
+                nodeOverlap: 20,
+                refresh: 20,
+                fit: false,
+                padding: isPreview ? 8 : 30,
+                randomize: false,
+                componentSpacing: 80,
+                nodeRepulsion: 300000,
+                edgeElasticity: 100,
+                nestingFactor: 5,
+                gravity: 80,
+                numIter: isPreview ? 250 : 1000,
+                initialTemp: 200,
+                coolingFactor: 0.95,
+                minTemp: 1.0,
+            });
+            layout.on('layoutstop', () => {
+                cy.fit(undefined, isPreview ? 8 : 30);
+
+                // High-DPI / large-screen scaling for Paparazzi and similar tools.
+                // On screens wider than 4K (3840px), the graph should scale UP
+                // to fill the extra space rather than just fitting to the container height.
+                if (!isPreview && window.screen.width > 3840) {
+                    const scaleFactor = window.screen.width / 3840;
+                    cy.zoom(cy.zoom() * scaleFactor);
+                    cy.center();
+                }
+            });
+            layout.run();
+        };
+        // Two rAF ticks: first lets the modal/container paint,
+        // second ensures the browser has committed the layout dimensions.
+        requestAnimationFrame(() => requestAnimationFrame(runLayout));
+
+        if (!isPreview) {
+            cy.on('tap', 'node', evt => {
+                const nodeId = evt.target.id();
+                const desc = attrMetaRef.current[nodeId] || 'Description not available.';
+                console.log('[Graph] node tapped:', nodeId, '| description:', desc);
+                setSelectedEdge(null);
+                setSelectedNode({ id: nodeId, description: desc });
+            });
+            cy.on('tap', 'edge', evt => {
+                const d = evt.target.data();
+                console.log('[Graph] edge tapped:', d.source, '->', d.target, '| weight:', d.weight, '| full data:', d);
+                setSelectedNode(null);
+                setSelectedEdge({ ...d });
+            });
+            cy.on('tap', evt => {
+                if (evt.target === cy) { setSelectedNode(null); setSelectedEdge(null); }
+            });
+        }
+
+        const onResize = () => { cy.resize(); cy.fit(); };
+        window.addEventListener('resize', onResize);
+        return () => {
+            window.removeEventListener('resize', onResize);
+            cy.destroy();
+            cyRef.current = null;
+        };
+    // attributeMetadata intentionally excluded — handled via attrMetaRef
+    }, [graphData, isPreview, centralNodeId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+    const edgeDisplay = selectedEdge ? getEdgeValue(selectedEdge) : null;
+
+    return (
+        <div className="relative w-full h-full border rounded-lg dark:border-gray-600 bg-white dark:bg-gray-900">
+            <div ref={domNodeRef} className="w-full h-full" />
+            {!isPreview && selectedNode && (
+                <div className="absolute top-2 left-2 bg-white/90 dark:bg-gray-800/90 backdrop-blur-sm p-3 rounded-lg shadow-lg border dark:border-gray-600 max-w-xs z-10">
+                    <h4 className="font-bold text-base text-gray-800 dark:text-gray-100">{selectedNode.id}</h4>
+                    <p className="text-sm text-gray-600 dark:text-gray-400 mt-1">{selectedNode.description}</p>
                 </div>
-
-                <div className="w-full max-w-6xl bg-white dark:bg-gray-800 rounded-xl shadow-lg p-6 mb-8 transition-colors">
-                    {/* ZABALITEĽNÝ FILTER */}
-                    <div className="flex justify-between items-center cursor-pointer" onClick={() => setIsAttributeFilterOpen(!isAttributeFilterOpen)}>
-                        <h2 className="text-2xl font-semibold text-gray-700 dark:text-gray-200">Filter by Attribute</h2>
-                        <svg
-                            xmlns="http://www.w3.org/2000/svg"
-                            className={`h-6 w-6 text-gray-500 dark:text-gray-400 transform transition-transform duration-300 ${isAttributeFilterOpen ? 'rotate-180' : ''}`}
-                            fill="none"
-                            viewBox="0 0 24 24"
-                            stroke="currentColor"
-                        >
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-                        </svg>
-                    </div>
-                    {/* Skrytie/Zobrazenie obsahu pomocou triedy "hidden" */}
-                    <div className={`mt-4 overflow-hidden transition-all duration-300 ease-in-out ${isAttributeFilterOpen ? 'max-h-96' : 'max-h-0'}`}>
-                        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-4">
-                            {attributeFilters.map(([attrName]) => {
-                                const count = counts[attrName] || 0;
-                                const isChecked = filters[attrName] || false;
-                                const isDisabled = !isChecked && count === 0;
-
-                                return (
-                                    <label key={attrName} className={`flex items-center p-2 rounded-lg transition-colors ${isDisabled ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer bg-gray-50 dark:bg-gray-700 hover:bg-gray-200 dark:hover:bg-gray-600'}`}>
-                                        <input
-                                            type="checkbox"
-                                            name={attrName}
-                                            checked={isChecked}
-                                            onChange={handleFilterChange}
-                                            disabled={isDisabled}
-                                            className="form-checkbox h-5 w-5 text-indigo-600 rounded focus:ring-indigo-500 disabled:bg-gray-300 dark:disabled:bg-gray-500"
-                                        />
-                                        <span className="ml-2 text-gray-800 dark:text-gray-100 text-sm font-medium">
-                                            {attrName} ({count})
-                                        </span>
-                                    </label>
-                                );
-                            })}
-                        </div>
-                    </div>
-                </div>
-
-                <div className="w-full max-w-6xl bg-white dark:bg-gray-800 rounded-xl shadow-lg p-6 transition-colors">
-                    <div className="flex justify-between items-center mb-4">
-                        <h2 className="text-2xl font-semibold text-gray-700 dark:text-gray-200">Analysis Results ({filteredAnalyses.length})</h2>
-                        <button onClick={() => setShowFullGraph(true)} className="bg-indigo-600 text-white py-2 px-4 rounded-lg hover:bg-indigo-700 transition-colors font-semibold shadow-md text-sm">
-                            Show Main Graph
-                        </button>
-                    </div>
-                    {filteredAnalyses.length === 0 ? (
-                        <p className="text-gray-500 dark:text-gray-400 text-center py-8">No analysis results match your current filters.</p>
+            )}
+            {!isPreview && selectedEdge && (
+                <div className="absolute top-2 left-2 bg-white/90 dark:bg-gray-800/90 backdrop-blur-sm p-3 rounded-lg shadow-lg border dark:border-gray-600 max-w-xs z-10">
+                    <h4 className="font-bold text-base text-gray-800 dark:text-gray-100">Correlation</h4>
+                    <p className="text-sm text-gray-600 dark:text-gray-400 mt-1">
+                        Between <strong>{selectedEdge.source}</strong> and <strong>{selectedEdge.target}</strong>
+                    </p>
+                    {edgeDisplay ? (
+                        <p className="text-sm font-semibold text-gray-800 dark:text-gray-200 mt-2">
+                            {edgeDisplay.key.charAt(0).toUpperCase() + edgeDisplay.key.slice(1)}:{' '}
+                            {typeof edgeDisplay.value === 'number' ? edgeDisplay.value.toFixed(4) : edgeDisplay.value}
+                        </p>
                     ) : (
-                        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
-                            {filteredAnalyses.map((analysis) => (
-                                <div
-                                    key={analysis.id}
-                                    className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-xl p-4 cursor-pointer hover:shadow-xl hover:border-indigo-500 transition-all duration-300 flex flex-col justify-between"
-                                    onClick={() => handleCardClick(analysis)}
-                                >
-                                    <div>
-                                        <h3 className="text-xl font-bold text-indigo-800 dark:text-indigo-400 mb-2">{analysis.name}</h3>
-                                        <p className="text-gray-600 dark:text-gray-400 text-sm mb-3 line-clamp-3">{analysis.correlationText}</p>
-                                    </div>
-                                    <div className="mt-4 text-right text-indigo-600 dark:text-indigo-400 font-semibold hover:underline">
-                                        View Details &rarr;
-                                    </div>
+                        <details className="mt-2">
+                            <summary className="text-xs text-red-500 cursor-pointer">⚠ Value not found — inspect raw data</summary>
+                            <pre className="text-xs text-gray-500 mt-1 overflow-x-auto whitespace-pre-wrap break-all">
+                                {JSON.stringify(selectedEdge, null, 2)}
+                            </pre>
+                        </details>
+                    )}
+                </div>
+            )}
+        </div>
+    );
+});
+
+// ─── Full-graph modal (no screenshot button — user didn't want it here) ───────
+const FullGraphModal = ({ onClose, graphData, attributeMetadata }) => {
+    const graphRef = useRef(null);
+
+    return (
+        <div className="fixed inset-0 bg-black bg-opacity-60 flex items-center justify-center p-4 z-50" onClick={onClose}>
+            <div
+                className="bg-gray-100 dark:bg-gray-800 rounded-xl shadow-2xl p-4 w-full h-full max-w-7xl max-h-[95vh] flex flex-col"
+                onClick={e => e.stopPropagation()}
+            >
+                <div className="flex justify-between items-center mb-2 flex-shrink-0">
+                    <div>
+                        <h2 className="text-2xl font-bold text-gray-800 dark:text-gray-100">Interactive Graph Visualization</h2>
+                        <p className="text-sm text-gray-500 dark:text-gray-400">Click a node or edge to view details. Zoom and pan with mouse/trackpad.</p>
+                    </div>
+                    <div className="flex space-x-2 items-center">
+                        <button
+                            onClick={() => graphRef.current?.exportPNG(4)}
+                            className="screenshot-btn px-3 py-1 text-sm text-white bg-blue-600 rounded-lg hover:bg-blue-700 whitespace-nowrap"
+                            title="Export graph canvas as high-res PNG (4x scale)"
+                        >
+                            Export PNG
+                        </button>
+                        <button onClick={onClose} className="text-gray-400 hover:text-gray-800 dark:hover:text-gray-200 text-3xl ml-2">&times;</button>
+                    </div>
+                </div>
+                <div className="flex-grow min-h-0" style={{height: '100%'}}>
+                    <CytoscapeGraph ref={graphRef} graphData={graphData} attributeMetadata={attributeMetadata} />
+                </div>
+            </div>
+        </div>
+    );
+};
+
+// ─── Subgraph detail modal (clique / claw) — with screenshot button ───────────
+const SubgraphModal = ({ analysis, attributeMetadata, edgeWeightMap, typeMap, onClose }) => {
+    const modalRef = useRef(null);
+    const cyRef = useRef(null);
+    const [screenshotting, setScreenshotting] = useState(false);
+
+    // Enrich subgraph edges with weight from the full graph lookup map
+    const enrichedGraphData = useMemo(() => {
+        if (!analysis.cytoscape_data) return analysis.cytoscape_data;
+        const enrichedEdges = (analysis.cytoscape_data.edges ?? []).map(e => {
+            const d = e.data ?? e;
+            const key = d.source + '||' + d.target;
+            const weight = (edgeWeightMap && edgeWeightMap[key] !== undefined)
+                ? edgeWeightMap[key]
+                : d.weight;
+            return { data: { ...d, weight } };
+        });
+        return { ...analysis.cytoscape_data, edges: enrichedEdges };
+    }, [analysis.cytoscape_data, edgeWeightMap]);
+
+    const handleScreenshot = async () => {
+        if (!modalRef.current) return;
+        setScreenshotting(true);
+        document.body.classList.add('capturing');
+        try {
+            // Pass the live cy instance so screenshotElement can resize+redraw
+            // the Cytoscape canvas after the modal is expanded for capture.
+            const cy = cyRef.current ? cyRef.current.getCy() : null;
+            await screenshotElement(
+                modalRef.current,
+                `${analysis.subgraph_type}_${analysis.nodes_data.join('-')}.png`,
+                cy
+            );
+        } finally {
+            document.body.classList.remove('capturing');
+            setScreenshotting(false);
+        }
+    };
+
+    return (
+        <div className="fixed inset-0 bg-black bg-opacity-60 flex items-center justify-center p-4 z-50" onClick={onClose}>
+            <div
+                ref={modalRef}
+                className="bg-white dark:bg-gray-800 rounded-xl shadow-2xl p-6 w-full max-w-3xl relative my-8 max-h-[90vh] overflow-y-auto modal-content"
+                onClick={e => e.stopPropagation()}
+            >
+                {/* Header */}
+                <div className="flex justify-between items-start mb-4">
+                    <h2 className="text-2xl font-bold text-gray-800 dark:text-gray-100 capitalize pr-4">
+                        {typeMap[analysis.subgraph_type] || analysis.subgraph_type}: {analysis.nodes_data.join(', ')}
+                    </h2>
+                    <div className="flex items-center space-x-2 flex-shrink-0">
+                        <button
+                            onClick={() => cyRef.current?.exportPNG(4)}
+                            className="screenshot-btn px-3 py-1 text-xs text-white bg-blue-600 rounded-lg hover:bg-blue-700 whitespace-nowrap"
+                            title="Export only the graph canvas as high-res PNG"
+                        >
+                            Graph PNG
+                        </button>
+                        <button
+                            onClick={handleScreenshot}
+                            disabled={screenshotting}
+                            className="screenshot-btn px-3 py-1 text-xs text-white bg-purple-600 rounded-lg hover:bg-purple-700 disabled:opacity-60 whitespace-nowrap"
+                            title="Screenshot this entire modal panel at ~300 DPI"
+                        >
+                            {screenshotting ? 'Capturing…' : 'Screenshot'}
+                        </button>
+                        <button onClick={onClose} className="text-gray-400 hover:text-gray-800 dark:hover:text-gray-200 text-3xl leading-none">&times;</button>
+                    </div>
+                </div>
+
+                {/* Body */}
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6 items-stretch">
+                    <div className="bg-gray-50 dark:bg-gray-900 p-4 rounded-lg">
+                        <h3 className="text-xl font-semibold text-gray-700 dark:text-gray-200 mb-3">Attributes and Descriptions</h3>
+                        <ul className="space-y-2">
+                            {Object.entries(analysis.attributes).map(([attr, desc]) => (
+                                <li key={attr}>
+                                    <strong className="text-gray-800 dark:text-gray-100">{attr}:</strong>{' '}
+                                    <span className="text-gray-600 dark:text-gray-400">{desc}</span>
+                                </li>
+                            ))}
+                        </ul>
+                    </div>
+                    <div className="bg-gray-50 dark:bg-gray-900 p-2 rounded-lg flex items-center justify-center min-h-[200px]">
+                        <CytoscapeGraph
+                            ref={cyRef}
+                            graphData={enrichedGraphData}
+                            attributeMetadata={attributeMetadata}
+                            centralNodeId={analysis.subgraph_type === 'claw' ? analysis.nodes_data[0] : null}
+                        />
+                    </div>
+                </div>
+
+                <div className="mt-6">
+                    <h3 className="text-xl font-semibold text-gray-700 dark:text-gray-200 mb-3">Final LLM Analysis</h3>
+                    <p className="text-gray-700 dark:text-gray-300 leading-relaxed bg-blue-50 dark:bg-blue-900/20 p-4 rounded-lg border-l-4 border-blue-500">
+                        {analysis.synthesized_analysis}
+                    </p>
+                </div>
+
+                {analysis.original_responses && analysis.original_responses.length > 0 && (
+                    <div className="mt-4">
+                        <h4 className="text-lg font-semibold text-gray-700 dark:text-gray-300 mb-2">Original AI Responses</h4>
+                        <div className="space-y-3">
+                            {analysis.original_responses.map((resp, i) => (
+                                <div key={i} className="bg-gray-100 dark:bg-gray-800 p-3 rounded-lg border dark:border-gray-700">
+                                    <p className="text-sm text-gray-600 dark:text-gray-400">
+                                        <span className="font-bold">Response #{i + 1}:</span> {resp}
+                                    </p>
                                 </div>
                             ))}
                         </div>
-                    )}
-                </div>
-
-                {selectedAnalysis && (
-                    <div className="fixed inset-0 bg-black bg-opacity-60 flex items-center justify-center p-4 z-50" onClick={closeModal}>
-                        <div
-                            className="bg-white dark:bg-gray-800 rounded-xl shadow-2xl p-6 w-full max-w-2xl relative my-8 max-h-[90vh] overflow-y-auto modal-content transition-colors"
-                            onClick={(e) => e.stopPropagation()}
-                        >
-                            <button onClick={closeModal} className="absolute top-4 right-4 text-gray-400 hover:text-gray-800 dark:hover:text-gray-200 text-3xl">&times;</button>
-                            <h2 className="text-3xl font-bold text-gray-800 dark:text-gray-100 mb-4">{selectedAnalysis.name}</h2>
-
-                            <div className="bg-indigo-50 dark:bg-indigo-900 rounded-lg p-4 mb-6 border border-indigo-200 dark:border-indigo-700">
-                                <h3 className="text-lg font-semibold text-indigo-900 dark:text-indigo-200 mb-2">Synthesized Conclusion</h3>
-                                <p className="text-gray-800 dark:text-gray-300 italic">{selectedAnalysis.correlationText}</p>
-                            </div>
-
-                            {selectedAnalysis.visualization_b64 ? (
-                                <div className="mb-6">
-                                    <h3 className="text-xl font-semibold text-gray-700 dark:text-gray-200 mb-3">Visualization</h3>
-                                    <div className="bg-gray-100 dark:bg-gray-900 p-4 rounded-lg flex justify-center border dark:border-gray-700">
-                                        <img src={selectedAnalysis.visualization_b64} alt={`Visualization of ${selectedAnalysis.name}`} className="max-w-full h-auto" />
-                                    </div>
-                                </div>
-                            ) : (
-                                <div className="mb-6">
-                                   <h3 className="text-xl font-semibold text-gray-700 dark:text-gray-200 mb-3">Visualization</h3>
-                                   <p className="text-gray-500 dark:text-gray-400">Visualization is not available for this item.</p>
-                                </div>
-                            )}
-
-                            <h3 className="text-xl font-semibold text-gray-700 dark:text-gray-200 mb-3">Attributes in this Group:</h3>
-                            <ul className="list-disc list-inside bg-gray-50 dark:bg-gray-900 p-4 rounded-lg mb-6 text-gray-700 dark:text-gray-300">
-                                {Object.keys(selectedAnalysis.attributes).map((attrName) => (
-                                    <li key={attrName}>
-                                        <span className="font-semibold">{attrName}:</span> {attributeMetadata[attrName]?.description || 'N/A'}
-                                    </li>
-                                ))}
-                            </ul>
-
-                            <OriginalResponses responses={selectedAnalysis.originalResponses} />
-
-                            <button onClick={closeModal} className="mt-6 w-full bg-indigo-600 text-white py-3 rounded-lg hover:bg-indigo-700 transition-colors font-semibold shadow-md">
-                                Close
-                            </button>
-                        </div>
                     </div>
                 )}
-                {showFullGraph && <FullGraphModal onClose={closeFullGraphModal} />}
             </div>
-        );
-    };
+        </div>
+    );
+};
 
-    const container = document.getElementById('root');
-    const root = ReactDOM.createRoot(container);
-    root.render(<App />);
-    </script>
+// ─── Main App ─────────────────────────────────────────────────────────────────
+const App = () => {
+    const [analysisFiles, setAnalysisFiles] = useState([]);
+    const [selectedFile, setSelectedFile] = useState('');
+    const [currentAnalysisData, setCurrentAnalysisData] = useState(null);
+    const [selectedSubgraph, setSelectedSubgraph] = useState(null);
+    const [filters, setFilters] = useState({});
+    const [counts, setCounts] = useState({});
+    const [loading, setLoading] = useState(true);
+    const [error, setError] = useState(null);
+    const [isDarkMode, setIsDarkMode] = useState(() => window.matchMedia('(prefers-color-scheme: dark)').matches);
+    const [screenshottingPage, setScreenshottingPage] = useState(false);
+
+    const handlePageScreenshot = async () => {
+        const el = document.getElementById('scale-root');
+        if (!el || !window.html2canvas) return;
+
+        const CAPTURE_W = 1440;
+        const CAPTURE_H = 1350;
+        const CAPTURE_SCALE = 10;
+        const isDark = document.documentElement.classList.contains('dark');
+        const bgColor = isDark ? '#111827' : '#f3f4f6';
+
+        console.log('[PageScreenshot] START — target:', CAPTURE_W, 'x', CAPTURE_H,
+            'scale:', CAPTURE_SCALE, 'dark:', isDark);
+
+        setScreenshottingPage(true);
+        document.body.classList.add('capturing');
+        await new Promise(r => setTimeout(r, 60));
+
+        // Stash
+        const prevTransform = el.style.transform;
+        const prevOverflow  = el.style.overflow;
+        const prevBodyH     = document.body.style.height;
+        const prevBodyBg    = document.body.style.background;
+        const prevScroll    = window.scrollY;
+
+        try {
+            // Force body to exact capture size BEFORE scrolling
+            // so scrollTo(0,0) actually works (can't scroll if content fits)
+            document.body.style.width    = CAPTURE_W + 'px';
+            document.body.style.height   = CAPTURE_H + 'px';
+            document.body.style.overflow = 'hidden';
+            document.body.style.background = bgColor;
+            document.body.style.margin   = '0';
+            document.body.style.padding  = '0';
+            document.documentElement.style.overflow = 'hidden';
+            document.documentElement.style.margin   = '0';
+            document.documentElement.style.padding  = '0';
+
+            // Force el to top-left, no transform
+            el.style.position  = 'absolute';
+            el.style.top       = '0';
+            el.style.left      = '0';
+            el.style.transform = 'none';
+            el.style.width     = CAPTURE_W + 'px';
+            el.style.maxHeight = CAPTURE_H + 'px';
+            el.style.overflow  = 'hidden';
+            el.style.margin    = '0';
+
+            // Now scroll — body is already clipped so this will actually reach 0
+            window.scrollTo(0, 0);
+            document.documentElement.scrollTop  = 0;
+            document.documentElement.scrollLeft = 0;
+            document.body.scrollTop  = 0;
+            document.body.scrollLeft = 0;
+
+            // Wait for reflow
+            await new Promise(r => setTimeout(r, 50));
+            await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+
+            const actualScrollY = window.scrollY;
+            console.log('[PageScreenshot] prepped — scrollY:', actualScrollY,
+                '| el.offsetH:', el.offsetHeight,
+                '| body.offsetW:', document.body.offsetWidth,
+                '| body.offsetH:', document.body.offsetHeight);
+
+            // Capture at scale:1 to avoid html2canvas text baseline bug where
+            // text is offset by scale * (lineHeight - fontSize) / 2 at high scales.
+            // We then manually scale the canvas up to the desired output size.
+            const outputCanvas = await html2canvas(document.body, {
+                scale:           1,
+                useCORS:         true,
+                backgroundColor: bgColor,
+                logging:         false,
+                width:           CAPTURE_W,
+                height:          CAPTURE_H,
+                windowWidth:     CAPTURE_W,
+                windowHeight:    CAPTURE_H,
+                scrollX:         -window.scrollX,
+                scrollY:         -window.scrollY,
+                x:               0,
+                y:               0,
+                onclone: (clonedDoc) => {
+                    if (isDark) clonedDoc.documentElement.classList.add('dark');
+
+                    const htmlEl = clonedDoc.documentElement;
+                    const bodyEl = clonedDoc.body;
+
+                    htmlEl.scrollTop  = 0;
+                    htmlEl.scrollLeft = 0;
+                    htmlEl.style.margin   = '0';
+                    htmlEl.style.padding  = '0';
+                    htmlEl.style.overflow = 'hidden';
+
+                    bodyEl.scrollTop  = 0;
+                    bodyEl.scrollLeft = 0;
+                    bodyEl.style.width    = CAPTURE_W + 'px';
+                    bodyEl.style.height   = CAPTURE_H + 'px';
+                    bodyEl.style.overflow = 'hidden';
+                    bodyEl.style.margin   = '0';
+                    bodyEl.style.padding  = '0';
+                    bodyEl.style.top      = '0';
+                    bodyEl.style.left     = '0';
+
+                    const clonedEl = clonedDoc.getElementById('scale-root');
+                    if (clonedEl) {
+                        clonedEl.style.position  = 'absolute';
+                        clonedEl.style.top       = '0';
+                        clonedEl.style.left      = '0';
+                        clonedEl.style.transform = 'none';
+                        clonedEl.style.width     = CAPTURE_W + 'px';
+                        clonedEl.style.maxHeight = CAPTURE_H + 'px';
+                        clonedEl.style.overflow  = 'hidden';
+                        clonedEl.style.margin    = '0';
+                    }
+
+
+
+                    // Tailwind preflight sets img{display:block} which causes
+                    // html2canvas to miscompute text baselines for all elements.
+                    // Fix: reset img to inline-block in the clone.
+                    let fixCount = 0;
+                    clonedDoc.querySelectorAll('img').forEach(img => {
+                        img.style.display = 'inline-block';
+                        fixCount++;
+                    });
+                    console.log('[onclone] img display fixed on', fixCount, 'images');
+
+                    // Boost Cytoscape pixelRatio to 4 for crisp canvas output
+                    const liveCanvases  = Array.from(el.querySelectorAll('canvas'));
+                    const cloneCanvases = Array.from(clonedDoc.querySelectorAll('canvas'));
+                    console.log('[PageScreenshot] onclone canvases — live:', liveCanvases.length,
+                        '| clone:', cloneCanvases.length);
+                    liveCanvases.forEach((src, i) => {
+                        const dst = cloneCanvases[i];
+                        if (!dst) return;
+                        // Scale up canvas 4x for high-res Cytoscape output
+                        const scale = 4;
+                        dst.width  = src.width  * scale;
+                        dst.height = src.height * scale;
+                        const ctx = dst.getContext('2d');
+                        ctx.scale(scale, scale);
+                        ctx.drawImage(src, 0, 0);
+                        // Reset canvas CSS size so layout isn't affected
+                        dst.style.width  = (src.width  / window.devicePixelRatio) + 'px';
+                        dst.style.height = (src.height / window.devicePixelRatio) + 'px';
+
+                    });
+                },
+            });
+
+            console.log('[PageScreenshot] raw canvas:', outputCanvas.width, 'x', outputCanvas.height);
+
+            const outW = CAPTURE_W * CAPTURE_SCALE;
+            const outH = CAPTURE_H * CAPTURE_SCALE;
+
+            // Scale up the 1x canvas to CAPTURE_SCALE x output size
+            const cropped = document.createElement('canvas');
+            cropped.width  = outW;
+            cropped.height = outH;
+            const ctx = cropped.getContext('2d');
+            ctx.imageSmoothingEnabled = true;
+            ctx.imageSmoothingQuality = 'high';
+            ctx.fillStyle = bgColor;
+            ctx.fillRect(0, 0, outW, outH);
+            ctx.drawImage(outputCanvas, 0, 0, CAPTURE_W, CAPTURE_H, 0, 0, outW, outH);
+            console.log('[PageScreenshot] scaled from', outputCanvas.width, 'x', outputCanvas.height,
+                'to', outW, 'x', outH);
+
+            // Diagnostic: sample a 1px-wide column at x=200 on the raw 1x canvas
+            // to find the first non-background pixel row — tells us actual text y-start
+            {
+                const dc = document.createElement('canvas');
+                dc.width = 1; dc.height = CAPTURE_H;
+                const dx = dc.getContext('2d');
+                dx.drawImage(outputCanvas, 200, 0, 1, CAPTURE_H, 0, 0, 1, CAPTURE_H);
+                const px = dx.getImageData(0, 0, 1, CAPTURE_H).data;
+                // background color in dark mode is approx rgb(17,24,39)
+                for (let y = 0; y < CAPTURE_H; y++) {
+                    const r=px[y*4], g=px[y*4+1], b=px[y*4+2];
+                    if (Math.abs(r-17)>10 || Math.abs(g-24)>10 || Math.abs(b-39)>10) {
+                        console.log('[diag] first non-bg pixel at x=200, y='+y, 'rgb('+r+','+g+','+b+')');
+                        break;
+                    }
+                }
+            }
+            cropped.toBlob(blob => {
+                console.log('[PageScreenshot] done — blob:', blob.size, 'bytes');
+                downloadBlob(blob, 'page_screenshot.png');
+            }, 'image/png');
+
+        } finally {
+            el.style.transform = prevTransform;
+            el.style.overflow  = prevOverflow;
+            el.style.maxHeight = '';
+            el.style.position  = '';
+            el.style.top       = '';
+            el.style.left      = '';
+            el.style.width     = '';
+            document.body.style.height     = prevBodyH;
+            document.body.style.background = prevBodyBg;
+            document.body.style.overflow   = '';
+            document.body.style.width      = '';
+            document.body.style.margin     = '';
+            document.body.style.padding    = '';
+            window.scrollTo(0, prevScroll);
+            console.log('[PageScreenshot] restored');
+            document.body.classList.remove('capturing');
+            setScreenshottingPage(false);
+        }
+    };
+    const [showFullGraph, setShowFullGraph] = useState(false);
+    const [isAttributeFilterOpen, setIsAttributeFilterOpen] = useState(false);
+    const [hideInactiveFilters, setHideInactiveFilters] = useState(false);
+
+    const typeMap = { clique: 'Clique', claw: 'Hotspot' };
+    const structureFilterDefs = [
+        { name: 'claw',     label: typeMap.claw },
+        { name: 'clique_3', label: `3-node ${typeMap.clique}` },
+        { name: 'clique_4', label: `4-node ${typeMap.clique}` },
+        { name: 'clique_5', label: `5-node ${typeMap.clique}` },
+    ];
+
+    useEffect(() => { document.documentElement.classList.toggle('dark', isDarkMode); }, [isDarkMode]);
+
+    useEffect(() => {
+        (async () => {
+            try {
+                setLoading(true);
+                const res = await fetch('http://127.0.0.1:5000/api/analyses');
+                if (!res.ok) throw new Error('Failed to load list of analyses.');
+                const files = await res.json();
+                setAnalysisFiles(files);
+                if (files.length > 0) setSelectedFile(files[0]);
+                else setLoading(false);
+            } catch (err) {
+                setError(`Cannot load analysis list. Is the server running? Error: ${err.message}`);
+                setLoading(false);
+            }
+        })();
+    }, []);
+
+    useEffect(() => {
+        if (!selectedFile) return;
+        (async () => {
+            try {
+                setLoading(true);
+                setError(null);
+                setCurrentAnalysisData(null);
+                const res = await fetch(`http://127.0.0.1:5000/api/analysis/${selectedFile}`);
+                if (!res.ok) throw new Error(`Failed to load '${selectedFile}'`);
+                const data = await res.json();
+                setCurrentAnalysisData(data);
+                const init = { claw: false, clique_3: false, clique_4: false, clique_5: false, show_no: false };
+                if (data.metadata?.attribute_descriptions) {
+                    Object.keys(data.metadata.attribute_descriptions).forEach(a => { init[a] = false; });
+                }
+                setFilters(init);
+            } catch (err) {
+                setError(err.message);
+                setCurrentAnalysisData(null);
+            } finally {
+                setLoading(false);
+            }
+        })();
+    }, [selectedFile]);
+
+    const analyses = currentAnalysisData?.analyses ?? [];
+
+    // Memoize so the object reference is stable — prevents useless child re-renders
+    const attributeMetadata = useMemo(
+        () => currentAnalysisData?.metadata?.attribute_descriptions ?? {},
+        [currentAnalysisData]
+    );
+
+    const graphDataForCytoscape = currentAnalysisData?.full_graph_cytoscape_data ?? { nodes: [], edges: [] };
+
+    // Build a weight lookup: "source||target" -> weight, from full graph edges.
+    // Used to enrich per-subgraph edges which don't carry weight themselves.
+    const edgeWeightMap = useMemo(() => {
+        const map = {};
+        const edges = currentAnalysisData?.full_graph_cytoscape_data?.edges ?? [];
+        edges.forEach(e => {
+            const d = e.data ?? e;
+            if (d.source && d.target && d.weight !== undefined) {
+                map[d.source + '||' + d.target] = d.weight;
+                map[d.target + '||' + d.source] = d.weight; // undirected
+            }
+        });
+        return map;
+    }, [currentAnalysisData]);
+
+    const allAnalysesCount = useMemo(() => {
+        const c = { claw: 0, clique_3: 0, clique_4: 0, clique_5: 0 };
+        analyses.forEach(a => {
+            if (a.subgraph_type === 'claw') { c.claw++; return; }
+            if (a.subgraph_type === 'clique') {
+                const n = a.nodes_data.length;
+                if (n === 3) c.clique_3++;
+                else if (n === 4) c.clique_4++;
+                else if (n === 5) c.clique_5++;
+            }
+        });
+        return c;
+    }, [analyses]);
+
+    const filteredAnalyses = useMemo(() => {
+        const activeStruct = ['claw', 'clique_3', 'clique_4', 'clique_5'].filter(k => filters[k]);
+        const activeAttrs  = Object.keys(attributeMetadata).filter(k => filters[k]);
+        if (!activeStruct.length && !activeAttrs.length && !filters.show_no) return analyses;
+        return analyses.filter(a => {
+            const okStruct = !activeStruct.length || activeStruct.some(f => {
+                if (f === 'claw') return a.subgraph_type === 'claw';
+                if (f.startsWith('clique_')) return a.subgraph_type === 'clique' && a.nodes_data.length === parseInt(f.split('_')[1], 10);
+                return false;
+            });
+            const okAttr = !activeAttrs.length || activeAttrs.every(attr => a.attributes.hasOwnProperty(attr));
+            const okNo   = !filters.show_no || a.synthesized_analysis?.trim().toLowerCase().startsWith('no');
+            return okStruct && okAttr && okNo;
+        });
+    }, [analyses, filters, attributeMetadata]);
+
+    // FIX for infinite re-render: depend only on filteredAnalyses (stable array ref),
+    // NOT on attributeMetadata (which previously changed every render in older code).
+    useEffect(() => {
+        const newCounts = {};
+        Object.keys(attributeMetadata).forEach(attr => { newCounts[attr] = 0; });
+        filteredAnalyses.forEach(a => {
+            Object.keys(a.attributes).forEach(attr => {
+                if (Object.prototype.hasOwnProperty.call(newCounts, attr)) newCounts[attr]++;
+            });
+        });
+        setCounts(newCounts);
+    }, [filteredAnalyses]); // attributeMetadata keys are stable after load; no need to add it here
+
+    const handleFilterChange = useCallback(e => {
+        const { name, checked } = e.target;
+        console.log('[Filter] changed:', name, '=', checked);
+        setFilters(prev => {
+            const next = { ...prev, [name]: checked };
+            console.log('[Filter] new filter state:', next);
+            return next;
+        });
+    }, []);
+
+    const alpha_norm_value = currentAnalysisData?.metadata?.alpha_normalized;
+    const threshold_value  = currentAnalysisData?.metadata?.correlation_threshold;
+
+    return (
+        <div className="min-h-screen bg-gray-100 dark:bg-gray-900 p-4 sm:p-6 font-sans flex flex-col items-center transition-colors">
+            <header className="w-full max-w-6xl text-center mb-6 relative">
+                <h1 className="text-4xl font-bold text-gray-800 dark:text-gray-100 mb-2">Interactive Graph Analyzer</h1>
+                <p className="text-lg text-gray-600 dark:text-gray-400">Explore attribute correlations analyzed by a local LLM.</p>
+                <div className="absolute top-0 right-0 flex items-center space-x-1">
+                    <button
+                        onClick={handlePageScreenshot}
+                        disabled={screenshottingPage}
+                        title="Screenshot entire page at high resolution"
+                        className="screenshot-btn p-2 rounded-full text-gray-500 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-700 disabled:opacity-50"
+                    >
+                        {screenshottingPage
+                            ? <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6 animate-spin" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg>
+                            : <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 13a3 3 0 11-6 0 3 3 0 016 0z" /></svg>
+                        }
+                    </button>
+                    <button onClick={() => setIsDarkMode(!isDarkMode)} className="p-2 rounded-full text-gray-500 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-700">
+                        <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            {isDarkMode
+                                ? <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z" />
+                                : <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z" />
+                            }
+                        </svg>
+                    </button>
+                </div>
+            </header>
+
+            <div className="w-full max-w-6xl bg-white dark:bg-gray-800 rounded-xl shadow-lg p-6 mb-8">
+                <div className="flex justify-between items-center mb-2">
+                    <label className="block text-lg font-semibold text-gray-700 dark:text-gray-200">Select Analysis Result</label>
+                    {alpha_norm_value !== undefined && (
+                        <span className="text-sm font-medium bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-300 px-2.5 py-0.5 rounded-full">
+                            Alpha: {alpha_norm_value.toFixed(2)}
+                            {threshold_value !== undefined && ` | Threshold: ${threshold_value.toFixed(4)}`}
+                        </span>
+                    )}
+                </div>
+                <div className="flex flex-col sm:flex-row space-y-2 sm:space-y-0 sm:space-x-4">
+                    <CustomSelect options={analysisFiles} selected={selectedFile} onSelect={setSelectedFile} placeholder="Loading analyses..." />
+                    <button onClick={() => { console.log('[Modal] opening full graph modal'); setShowFullGraph(true); }} disabled={loading || !currentAnalysisData}
+                        className="px-5 py-2 text-white bg-indigo-600 rounded-lg hover:bg-indigo-700 disabled:bg-indigo-300 disabled:cursor-not-allowed whitespace-nowrap">
+                        Show Interactive Graph
+                    </button>
+                </div>
+            </div>
+
+            {error && (
+                <div className="w-full max-w-6xl bg-red-50 dark:bg-red-900/20 border border-red-300 dark:border-red-700 rounded-xl p-4 mb-8 text-red-700 dark:text-red-300">{error}</div>
+            )}
+            {loading && (
+                <div className="text-xl text-gray-700 dark:text-gray-300 animate-pulse my-8">Loading '{selectedFile}'…</div>
+            )}
+
+            {currentAnalysisData && !loading && (
+                <>
+                    {/* Structure filters */}
+                    <div className="w-full max-w-6xl bg-white dark:bg-gray-800 rounded-xl shadow-lg p-6 mb-8 transition-colors">
+                        <h2 className="text-2xl font-semibold text-gray-700 dark:text-gray-200 mb-4">Filter by Structure</h2>
+                        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-4">
+                            {structureFilterDefs
+                                .filter(({ name }) => !hideInactiveFilters || (allAnalysesCount[name] || 0) > 0 || filters[name])
+                                .map(({ name, label }) => {
+                                    const count = allAnalysesCount[name] || 0;
+                                    const checked  = filters[name] || false;
+                                    const disabled = !checked && count === 0;
+                                    return (
+                                        <label key={name} className={`flex items-center p-2 rounded-lg transition-colors ${disabled ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer bg-gray-50 dark:bg-gray-700 hover:bg-gray-200 dark:hover:bg-gray-600'}`}>
+                                            <input type="checkbox" name={name} checked={checked} onChange={handleFilterChange} disabled={disabled} className="form-checkbox h-5 w-5 text-indigo-600 rounded focus:ring-indigo-500" />
+                                            <span className="ml-2 text-gray-800 dark:text-gray-100 text-sm font-medium">{label} ({count})</span>
+                                        </label>
+                                    );
+                                })}
+                            <label className="flex items-center p-2 rounded-lg cursor-pointer bg-gray-50 dark:bg-gray-700 hover:bg-gray-200 dark:hover:bg-gray-600">
+                                <input type="checkbox" name="show_no" checked={filters.show_no || false} onChange={handleFilterChange} className="form-checkbox h-5 w-5 text-indigo-600 rounded focus:ring-indigo-500" />
+                                <span className="ml-2 text-gray-800 dark:text-gray-100 text-sm font-medium">Only 'No' Answers</span>
+                            </label>
+                        </div>
+                    </div>
+
+                    {/* Attribute filters */}
+                    <div className="w-full max-w-6xl bg-white dark:bg-gray-800 rounded-xl shadow-lg p-6 mb-8 transition-colors">
+                        <div className="flex justify-between items-center">
+                            <div className="flex items-center space-x-3 cursor-pointer" onClick={() => setIsAttributeFilterOpen(v => !v)}>
+                                <h2 className="text-2xl font-semibold text-gray-700 dark:text-gray-200">Filter by Attribute</h2>
+                                <svg xmlns="http://www.w3.org/2000/svg" className={`h-6 w-6 text-gray-500 dark:text-gray-400 transform transition-transform duration-300 ${isAttributeFilterOpen ? 'rotate-180' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                                </svg>
+                            </div>
+                            <label className="flex items-center space-x-2 cursor-pointer text-sm text-gray-600 dark:text-gray-400">
+                                <input type="checkbox" checked={hideInactiveFilters} onChange={e => { e.stopPropagation(); setHideInactiveFilters(v => !v); }}
+                                    className="form-checkbox h-4 w-4 text-indigo-600 rounded focus:ring-indigo-500" />
+                                <span>Hide inactive</span>
+                            </label>
+                        </div>
+                        <div className={`mt-4 overflow-y-auto transition-all duration-300 ease-in-out ${isAttributeFilterOpen ? 'max-h-96' : 'max-h-0'}`}>
+                            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-4">
+                                {Object.keys(attributeMetadata).sort()
+                                    .filter(a => !hideInactiveFilters || (counts[a] || 0) > 0 || filters[a])
+                                    .map(attrName => {
+                                        const count = counts[attrName] || 0;
+                                        const checked  = filters[attrName] || false;
+                                        const disabled = !checked && count === 0;
+                                        return (
+                                            <label key={attrName} className={`flex items-center p-2 rounded-lg transition-colors ${disabled ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer bg-gray-50 dark:bg-gray-700 hover:bg-gray-200 dark:hover:bg-gray-600'}`}>
+                                                <input type="checkbox" name={attrName} checked={checked} onChange={handleFilterChange} disabled={disabled} className="form-checkbox h-5 w-5 text-indigo-600 rounded focus:ring-indigo-500" />
+                                                <span className="ml-2 text-gray-800 dark:text-gray-100 text-sm font-medium">{attrName} ({count})</span>
+                                            </label>
+                                        );
+                                    })}
+                            </div>
+                        </div>
+                    </div>
+
+                    {/* Card grid */}
+                    <main className="w-full max-w-6xl">
+                        <p className="text-center mb-6 text-gray-600 dark:text-gray-400">
+                            Showing <span className="font-bold text-indigo-500">{filteredAnalyses.length}</span> of <span className="font-bold">{analyses.length}</span> total subgraphs.
+                        </p>
+                        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                            {filteredAnalyses.length > 0 ? filteredAnalyses.map((analysis, index) => (
+                                <div key={index} onClick={() => { console.log('[Modal] opening subgraph:', analysis.subgraph_type, analysis.nodes_data); setSelectedSubgraph(analysis); }}
+                                    className="bg-white dark:bg-gray-800 rounded-lg shadow-md hover:shadow-xl hover:-translate-y-1 transition-all duration-300 cursor-pointer flex flex-col">
+                                    <div className="p-5 flex-shrink-0">
+                                        <h3 className="text-xl font-bold text-gray-800 dark:text-gray-100 mb-2 capitalize">
+                                            {typeMap[analysis.subgraph_type] || analysis.subgraph_type}: {analysis.nodes_data.join(', ')}
+                                        </h3>
+                                        <p className="text-gray-600 dark:text-gray-400 text-sm h-20 line-clamp-3">{analysis.synthesized_analysis}</p>
+                                    </div>
+                                    <div className="flex-grow mt-auto h-36 bg-gray-50 dark:bg-gray-700 p-2">
+                                        <CytoscapeGraph
+                                            graphData={analysis.cytoscape_data}
+                                            attributeMetadata={attributeMetadata}
+                                            isPreview={true}
+                                            centralNodeId={analysis.subgraph_type === 'claw' ? analysis.nodes_data[0] : null}
+                                        />
+                                    </div>
+                                </div>
+                            )) : (
+                                <div className="col-span-full text-center py-12">
+                                    <p className="text-gray-500 dark:text-gray-400">No results match your filters.</p>
+                                </div>
+                            )}
+                        </div>
+                    </main>
+                </>
+            )}
+
+            {showFullGraph && (
+                <Portal>
+                    <FullGraphModal
+                        onClose={() => { console.log('[Modal] closing full graph modal'); setShowFullGraph(false); }}
+                        graphData={graphDataForCytoscape}
+                        attributeMetadata={attributeMetadata}
+                    />
+                </Portal>
+            )}
+
+            {selectedSubgraph && (
+                <Portal>
+                    <SubgraphModal
+                        analysis={selectedSubgraph}
+                        attributeMetadata={attributeMetadata}
+                        edgeWeightMap={edgeWeightMap}
+                        typeMap={typeMap}
+                        onClose={() => { console.log('[Modal] closing subgraph modal'); setSelectedSubgraph(null); }}
+                    />
+                </Portal>
+            )}
+        </div>
+    );
+};
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
 </body>
 </html>
