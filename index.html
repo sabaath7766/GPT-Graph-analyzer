@@ -116,20 +116,65 @@ const downloadFile = (content, fileName, contentType) => {
 
 /**
  * Export a Cytoscape instance as a high-resolution PNG.
- * We use cy.png() with a scale multiplier. At scale=4 the exported canvas is
- * 4x the rendered pixel dimensions in each direction, giving ~4x the detail.
- * The 'base64uri' output is a proper data-URI we can assign to <a href> directly.
+ *
+ * The problem: cy.png({ full:true, scale:S }) internally allocates a canvas
+ * of (bb.w * S * pixelRatio) × (bb.h * S * pixelRatio) pixels. With
+ * pixelRatio:4 and a large graph this easily exceeds the browser hard limit
+ * of 268,435,456 px² (2^28), causing a silent failure.
+ *
+ * The fix: never let Cytoscape allocate the large canvas itself.
+ *   1. Call cy.png({ scale:1 }) — tiny canvas, always fits regardless of
+ *      pixelRatio, gives us a crisp 1× vector-rendered base image.
+ *   2. Draw that base image onto OUR OWN canvas scaled to the desired size.
+ *      Our canvas is (bb.w * desiredScale) × (bb.h * desiredScale) — no
+ *      pixelRatio multiplier — so we have full deterministic control.
+ *   3. If even our canvas would exceed the browser limit, clamp desiredScale.
+ *
+ * pixelRatio:4 on the live instance is untouched and keeps the display crisp.
  */
-const exportCyPNG = (cy, filename, scale) => {
-    // fit() ensures all nodes are visible before export
+const MAX_CANVAS_AREA  = 268435456;
+const SAFE_CANVAS_AREA = MAX_CANVAS_AREA * 0.90;
+
+const exportCyPNG = (cy, filename, requestedScale) => {
+    if (!cy) return;
+
     cy.fit(undefined, 30);
-    // full:true renders the entire graph bounding box at the given scale,
-    // giving a high-res image regardless of current zoom/pan.
-    const dataUri = cy.png({ output: 'base64uri', scale: scale || 4, full: true, bg: '#ffffff' });
-    const a = document.createElement('a');
-    a.href = dataUri;
-    a.download = filename || 'graph.png';
-    a.click();
+
+    const bb  = cy.elements().boundingBox();
+    const bbW = Math.max(bb.w || 1, 1);
+    const bbH = Math.max(bb.h || 1, 1);
+
+    let scale = requestedScale || 4;
+
+    // Clamp our own output canvas if needed (independent of pixelRatio).
+    if (bbW * scale * bbH * scale > SAFE_CANVAS_AREA) {
+        scale = Math.sqrt(SAFE_CANVAS_AREA / (bbW * bbH));
+        scale = Math.max(scale, 1);
+        console.warn(`[exportCyPNG] scale clamped to ${scale.toFixed(2)}×`);
+    }
+
+    const outW = Math.round(bbW * scale);
+    const outH = Math.round(bbH * scale);
+    console.log(`[exportCyPNG] "${filename}" ${scale.toFixed(2)}× → ${outW}×${outH} px`);
+
+    // Step 1: get a 1× base render from Cytoscape (small canvas, always safe).
+    const base64uri = cy.png({ output: 'base64uri', scale: 1, full: true, bg: '#ffffff' });
+
+    // Step 2: draw onto our own canvas at the desired output size.
+    const img = new Image();
+    img.onload = () => {
+        const canvas = document.createElement('canvas');
+        canvas.width  = outW;
+        canvas.height = outH;
+        const ctx = canvas.getContext('2d');
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = 'high';
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, outW, outH);
+        ctx.drawImage(img, 0, 0, outW, outH);
+        canvas.toBlob(blob => downloadBlob(blob, (filename || 'graph') + '.png'), 'image/png');
+    };
+    img.src = base64uri;
 };
 
 /**
@@ -292,7 +337,11 @@ const CytoscapeGraph = React.forwardRef(({ graphData, attributeMetadata, isPrevi
 
     useImperativeHandle(ref, () => ({
         exportPNG: (scale) => {
-            if (cyRef.current) exportCyPNG(cyRef.current, 'graph.png', scale || 4);
+            if (cyRef.current) exportCyPNG(cyRef.current, 'graph', scale || 4);
+        },
+        // Named export: accepts a full filename base (no extension)
+        exportPNGNamed: (filenameBase, scale) => {
+            if (cyRef.current) exportCyPNG(cyRef.current, filenameBase, scale || 4);
         },
         // Expose raw cy instance so parent components (e.g. screenshot handler)
         // can call cy.resize() / cy.fit() directly.
@@ -450,9 +499,20 @@ const CytoscapeGraph = React.forwardRef(({ graphData, attributeMetadata, isPrevi
     );
 });
 
-// ─── Full-graph modal (no screenshot button — user didn't want it here) ───────
-const FullGraphModal = ({ onClose, graphData, attributeMetadata }) => {
+// ─── Full-graph modal ─────────────────────────────────────────────────────────
+// selectedFile is passed in so the export filename reflects which JSON is loaded.
+const FullGraphModal = ({ onClose, graphData, attributeMetadata, selectedFile }) => {
     const graphRef = useRef(null);
+
+    // Build a clean filename base from the selected JSON filename:
+    //   "my_analysis_2024.json"  →  "full_graph_my_analysis_2024"
+    //   "results"                →  "full_graph_results"
+    const exportFilenameBase = useMemo(() => {
+        const base = selectedFile
+            ? selectedFile.replace(/\.json$/i, '').replace(/[^a-zA-Z0-9_\-]/g, '_')
+            : 'graph';
+        return `full_graph_${base}`;
+    }, [selectedFile]);
 
     return (
         <div className="fixed inset-0 bg-black bg-opacity-60 flex items-center justify-center p-4 z-50" onClick={onClose}>
@@ -467,9 +527,9 @@ const FullGraphModal = ({ onClose, graphData, attributeMetadata }) => {
                     </div>
                     <div className="flex space-x-2 items-center">
                         <button
-                            onClick={() => graphRef.current?.exportPNG(4)}
+                            onClick={() => graphRef.current?.exportPNGNamed(exportFilenameBase, 4)}
                             className="screenshot-btn px-3 py-1 text-sm text-white bg-blue-600 rounded-lg hover:bg-blue-700 whitespace-nowrap"
-                            title="Export graph canvas as high-res PNG (4x scale)"
+                            title="Export graph canvas as high-res PNG (auto-scaled to fit browser limits)"
                         >
                             Export PNG
                         </button>
@@ -635,11 +695,32 @@ const App = () => {
         await new Promise(r => setTimeout(r, 60));
 
         // Stash
-        const prevTransform = el.style.transform;
-        const prevOverflow  = el.style.overflow;
-        const prevBodyH     = document.body.style.height;
-        const prevBodyBg    = document.body.style.background;
         const prevScroll    = window.scrollY;
+
+        // Snapshot every style we touch so finally can restore them exactly.
+        const prevEl = {
+            transform: el.style.transform,
+            overflow:  el.style.overflow,
+            position:  el.style.position,
+            top:       el.style.top,
+            left:      el.style.left,
+            width:     el.style.width,
+            maxHeight: el.style.maxHeight,
+            margin:    el.style.margin,
+        };
+        const prevBody = {
+            width:      document.body.style.width,
+            height:     document.body.style.height,
+            overflow:   document.body.style.overflow,
+            background: document.body.style.background,
+            margin:     document.body.style.margin,
+            padding:    document.body.style.padding,
+        };
+        const prevHtml = {
+            overflow: document.documentElement.style.overflow,
+            margin:   document.documentElement.style.margin,
+            padding:  document.documentElement.style.padding,
+        };
 
         try {
             // Force body to exact capture size BEFORE scrolling
@@ -731,8 +812,6 @@ const App = () => {
                         clonedEl.style.margin    = '0';
                     }
 
-
-
                     // Tailwind preflight sets img{display:block} which causes
                     // html2canvas to miscompute text baselines for all elements.
                     // Fix: reset img to inline-block in the clone.
@@ -807,19 +886,24 @@ const App = () => {
             }, 'image/png');
 
         } finally {
-            el.style.transform = prevTransform;
-            el.style.overflow  = prevOverflow;
-            el.style.maxHeight = '';
-            el.style.position  = '';
-            el.style.top       = '';
-            el.style.left      = '';
-            el.style.width     = '';
-            document.body.style.height     = prevBodyH;
-            document.body.style.background = prevBodyBg;
-            document.body.style.overflow   = '';
-            document.body.style.width      = '';
-            document.body.style.margin     = '';
-            document.body.style.padding    = '';
+            // Restore every property on every element we touched.
+            el.style.transform = prevEl.transform;
+            el.style.overflow  = prevEl.overflow;
+            el.style.position  = prevEl.position;
+            el.style.top       = prevEl.top;
+            el.style.left      = prevEl.left;
+            el.style.width     = prevEl.width;
+            el.style.maxHeight = prevEl.maxHeight;
+            el.style.margin    = prevEl.margin;
+            document.body.style.width      = prevBody.width;
+            document.body.style.height     = prevBody.height;
+            document.body.style.overflow   = prevBody.overflow;
+            document.body.style.background = prevBody.background;
+            document.body.style.margin     = prevBody.margin;
+            document.body.style.padding    = prevBody.padding;
+            document.documentElement.style.overflow = prevHtml.overflow;
+            document.documentElement.style.margin   = prevHtml.margin;
+            document.documentElement.style.padding  = prevHtml.padding;
             window.scrollTo(0, prevScroll);
             console.log('[PageScreenshot] restored');
             document.body.classList.remove('capturing');
@@ -1117,6 +1201,7 @@ const App = () => {
                         onClose={() => { console.log('[Modal] closing full graph modal'); setShowFullGraph(false); }}
                         graphData={graphDataForCytoscape}
                         attributeMetadata={attributeMetadata}
+                        selectedFile={selectedFile}
                     />
                 </Portal>
             )}
