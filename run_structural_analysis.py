@@ -51,7 +51,7 @@ def generate_analysis_plot():
 
             # --- VÝPOČET A APLIKÁCIA FILTRA ---
             # 1. Definujeme alpha a vypočítame dynamický prah presne ako v knižnici
-            ALPHA_FOR_HEATMAP = 1.0
+            ALPHA_FOR_HEATMAP = 0.1
             alpha_internal = ALPHA_FOR_HEATMAP * 0.3
             cor_values = corr_matrix.values[np.where(~np.eye(corr_matrix.shape[0], dtype=bool))]
             threshold = (np.max(cor_values) + np.mean(cor_values)) / 2 + alpha_internal
@@ -105,6 +105,41 @@ def generate_analysis_plot():
             continue
 
         df = pd.DataFrame(results)
+
+        # =========================================================================
+        # NOVÁ SEKCIA: VÝPIS SÚHRNNÝCH ŠTATISTÍK
+        # =========================================================================
+        print("\n" + "~" * 40)
+        print(f"📊 SÚHRNNÉ ŠTATISTIKY PRE {dataset_name.upper()}")
+        print("~" * 40)
+
+        # Nájdeme riadok s maximálnym počtom štruktúr
+        max_total_row = df.loc[df['total'].idxmax()]
+        # Nájdeme riadok s maximálnym počtom n-ptých
+        max_ptychy_row = df.loc[df['ptychy'].idxmax()]
+        # Nájdeme riadok s maximálnym počtom hotspotov
+        max_hotspoty_row = df.loc[df['hotspoty'].idxmax()]
+
+        # Základné štatistiky
+        print("▶ Počet n-ptých (Ptychy):")
+        print(f"  - Max počet: {df['ptychy'].max()} (pri alpha={max_ptychy_row['alpha']:.2f})")
+        print(f"  - Min počet: {df['ptychy'].min()} (pri alpha={df.loc[df['ptychy'].idxmin()]['alpha']:.2f})")
+        print(f"  - Priemer: {df['ptychy'].mean():.2f}")
+
+        print("\n▶ Počet Hotspotov:")
+        print(f"  - Max počet: {df['hotspoty'].max()} (pri alpha={max_hotspoty_row['alpha']:.2f})")
+        print(f"  - Min počet: {df['hotspoty'].min()} (pri alpha={df.loc[df['hotspoty'].idxmin()]['alpha']:.2f})")
+        print(f"  - Priemer: {df['hotspoty'].mean():.2f}")
+
+        print("\n▶ Celkový počet štruktúr (Ptychy + Hotspoty):")
+        print(f"  - Max celkový počet: {df['total'].max()} (pri alpha={max_total_row['alpha']:.2f})")
+        print(f"  - Min celkový počet: {df['total'].min()} (pri alpha={df.loc[df['total'].idxmin()]['alpha']:.2f})")
+        print(f"  - Priemer: {df['total'].mean():.2f}")
+        print("-" * 40)
+        # =========================================================================
+        # KONIEC NOVEJ SEKCIE
+        # =========================================================================
+
 
         fig, ax1 = plt.subplots(figsize=(12, 7))
         ax2 = ax1.twinx()

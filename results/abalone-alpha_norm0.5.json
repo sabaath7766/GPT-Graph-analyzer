@@ -1,0 +1,28 @@
+{
+  "metadata": {
+    "dataset_name": "abalone",
+    "csv_path": "datasets/abalone.csv",
+    "descriptions_path": "datasets/abalone_descriptions.json",
+    "alpha_internal": 0.15,
+    "alpha_normalized": 0.5,
+    "total_analyses_found": 0,
+    "total_analyses_processed": 0,
+    "timed_out": false,
+    "attribute_descriptions": {
+      "Sex": "Gender of the abalone. Categorical data: M (male), F (female), and I (infant). This column will be ignored by the correlation analysis.",
+      "Length": "The longest measurement of the abalone shell, in millimeters (mm).",
+      "Diameter": "The measurement of the abalone shell perpendicular to its length, in millimeters (mm).",
+      "Height": "The height of the abalone shell including the meat, in millimeters (mm).",
+      "Whole_weight": "The total weight of the entire abalone, in grams.",
+      "Shucked_weight": "The weight of the abalone meat only, after being removed from the shell, in grams.",
+      "Viscera_weight": "The weight of the gut (internal organs) after bleeding, in grams.",
+      "Shell_weight": "The weight of the abalone shell after it has been dried, in grams.",
+      "Rings": "The number of rings on the shell. The actual age of the abalone in years is determined by adding 1.5 to this number. This is the primary target variable for age prediction."
+    }
+  },
+  "full_graph_cytoscape_data": {
+    "nodes": [],
+    "edges": []
+  },
+  "analyses": []
+}
