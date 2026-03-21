@@ -22,7 +22,7 @@ def generate_analysis_plot():
         ),
         "EnergyData": (
             "datasets/energydata.csv",
-            "datasets/attribute_descriptions.json"
+            "datasets/energydata_descriptions.json"
         ),
         "Superconductivity": (
             "datasets/train.csv",

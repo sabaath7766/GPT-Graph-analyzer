@@ -10,7 +10,6 @@
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
     <script src="https://unpkg.com/cytoscape/dist/cytoscape.min.js"></script>
-    <!-- html2canvas for modal screenshots -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.3.4/html2canvas.min.js"></script>
     <style>
         .modal-content::-webkit-scrollbar { width: 8px; }
@@ -19,68 +18,48 @@
         .dark .modal-content::-webkit-scrollbar-track { background: #1e293b; }
         .dark .modal-content::-webkit-scrollbar-thumb { background: #64748b; }
         .line-clamp-3 { overflow: hidden; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; }
-
-        /* Hide all screenshot/export buttons while any capture is in progress */
         body.capturing .screenshot-btn { visibility: hidden; pointer-events: none; }
-
-        /* ── Full-width viewport scaling ───────────────────────────────────────
-           The page is designed at a base width of 1440px.
-           On any wider screen (Paparazzi, 4K, 5K, 10K…) we scale the entire
-           root element up proportionally so it always fills the full viewport
-           width while keeping the aspect ratio intact.
-           transform-origin: top left ensures scaling anchors to the top-left
-           corner so nothing is clipped.
-        ────────────────────────────────────────────────────────────────────── */
-        html, body {
-            margin: 0;
-            padding: 0;
-            width: 100%;
-            overflow-x: hidden;
-        }
-        #scale-root {
-            width: 1440px;
-            transform-origin: top left;
-        }
+        html, body { margin: 0; padding: 0; width: 100%; overflow-x: hidden; }
+        #scale-root { width: 1440px; transform-origin: top left; }
     </style>
 
     <script>
-        // Apply and update the scale whenever the window resizes.
-        // scale = viewportWidth / designWidth
-        // This makes the page pixel-perfect at 1440px and scales proportionally
-        // on any wider display (4K, 5K, 10K, Paparazzi virtual screens, etc.)
         (function() {
             var DESIGN_WIDTH = 1440;
+            var _ro = null;
+
+            window.__scaler = {
+                pause: function() {
+                    if (_ro) _ro.disconnect();
+                    window.removeEventListener('resize', applyScale);
+                },
+                resume: function() {
+                    var el = document.getElementById('scale-root');
+                    if (el && _ro) _ro.observe(el);
+                    window.addEventListener('resize', applyScale);
+                    applyScale();
+                }
+            };
 
             function applyScale() {
                 var el = document.getElementById('scale-root');
                 if (!el) return;
                 var scale = window.innerWidth / DESIGN_WIDTH;
                 el.style.transform = 'scale(' + scale + ')';
-                // scale-root is in normal flow at 1440px wide but the browser
-                // sees it as 1440px wide after transform — we need to tell the
-                // body the true rendered height so scrolling works correctly.
-                // offsetHeight is read after transform is applied so it reflects
-                // the 1440px natural height; multiply by scale for screen pixels.
                 var naturalH = el.offsetHeight;
                 document.body.style.height = Math.ceil(naturalH * scale) + 'px';
             }
 
-            // Re-run whenever scale-root's content size changes (cards load, filters expand)
             function observe() {
                 var el = document.getElementById('scale-root');
                 if (!el) return;
-                var ro = new ResizeObserver(applyScale);
-                ro.observe(el);
+                _ro = new ResizeObserver(applyScale);
+                _ro.observe(el);
             }
 
             window.addEventListener('resize', applyScale);
-            document.addEventListener('DOMContentLoaded', function() {
-                applyScale();
-                observe();
-            });
-            if (document.readyState !== 'loading') {
-                setTimeout(function() { applyScale(); observe(); }, 0);
-            }
+            document.addEventListener('DOMContentLoaded', function() { applyScale(); observe(); });
+            if (document.readyState !== 'loading') { setTimeout(function() { applyScale(); observe(); }, 0); }
         })();
     </script>
 </head>
@@ -88,13 +67,18 @@
 <div id="scale-root">
 <div id="root"></div>
 </div>
-<!-- Modals render here, outside scale-root, so CSS transform doesn't break fixed positioning -->
 <div id="modal-root"></div>
 <script type="text/babel">
+
+// ─── DEBUG CONFIG ─────────────────────────────────────────────────────────────
+// Set to true to show debug filter panel at top of page
+const SHOW_DEBUG_FILTERS = false;
+// Set to true to show filter panels (structure + attribute) on page and in screenshot
+const SHOW_FILTERS = false;
+// ─────────────────────────────────────────────────────────────────────────────
+
 const { useState, useEffect, useMemo, useRef, useCallback, useImperativeHandle } = React;
 
-// Renders children into #modal-root which lives outside #scale-root,
-// preventing CSS transform on scale-root from breaking fixed positioning.
 const Portal = ({ children }) => {
     const el = useRef(document.getElementById('modal-root'));
     return ReactDOM.createPortal(children, el.current);
@@ -114,53 +98,24 @@ const downloadFile = (content, fileName, contentType) => {
     downloadBlob(new Blob([content], { type: contentType }), fileName);
 };
 
-/**
- * Export a Cytoscape instance as a high-resolution PNG.
- *
- * The problem: cy.png({ full:true, scale:S }) internally allocates a canvas
- * of (bb.w * S * pixelRatio) × (bb.h * S * pixelRatio) pixels. With
- * pixelRatio:4 and a large graph this easily exceeds the browser hard limit
- * of 268,435,456 px² (2^28), causing a silent failure.
- *
- * The fix: never let Cytoscape allocate the large canvas itself.
- *   1. Call cy.png({ scale:1 }) — tiny canvas, always fits regardless of
- *      pixelRatio, gives us a crisp 1× vector-rendered base image.
- *   2. Draw that base image onto OUR OWN canvas scaled to the desired size.
- *      Our canvas is (bb.w * desiredScale) × (bb.h * desiredScale) — no
- *      pixelRatio multiplier — so we have full deterministic control.
- *   3. If even our canvas would exceed the browser limit, clamp desiredScale.
- *
- * pixelRatio:4 on the live instance is untouched and keeps the display crisp.
- */
 const MAX_CANVAS_AREA  = 268435456;
 const SAFE_CANVAS_AREA = MAX_CANVAS_AREA * 0.90;
 
 const exportCyPNG = (cy, filename, requestedScale) => {
     if (!cy) return;
-
     cy.fit(undefined, 30);
-
     const bb  = cy.elements().boundingBox();
     const bbW = Math.max(bb.w || 1, 1);
     const bbH = Math.max(bb.h || 1, 1);
-
     let scale = requestedScale || 4;
-
-    // Clamp our own output canvas if needed (independent of pixelRatio).
     if (bbW * scale * bbH * scale > SAFE_CANVAS_AREA) {
         scale = Math.sqrt(SAFE_CANVAS_AREA / (bbW * bbH));
         scale = Math.max(scale, 1);
         console.warn(`[exportCyPNG] scale clamped to ${scale.toFixed(2)}×`);
     }
-
     const outW = Math.round(bbW * scale);
     const outH = Math.round(bbH * scale);
-    console.log(`[exportCyPNG] "${filename}" ${scale.toFixed(2)}× → ${outW}×${outH} px`);
-
-    // Step 1: get a 1× base render from Cytoscape (small canvas, always safe).
     const base64uri = cy.png({ output: 'base64uri', scale: 1, full: true, bg: '#ffffff' });
-
-    // Step 2: draw onto our own canvas at the desired output size.
     const img = new Image();
     img.onload = () => {
         const canvas = document.createElement('canvas');
@@ -177,17 +132,11 @@ const exportCyPNG = (cy, filename, requestedScale) => {
     img.src = base64uri;
 };
 
-/**
- * Extract the numeric correlation value from edge data.
- * The tap handler now always constructs { source, target, weight } explicitly
- * using Cytoscape's single-key getter, so this is a straightforward lookup.
- */
 const getEdgeValue = (edgeData) => {
     if (!edgeData) return null;
     if (edgeData.weight !== undefined && edgeData.weight !== null) {
         return { key: 'weight', value: edgeData.weight };
     }
-    // Fallback: scan all numeric non-metadata keys
     const skip = new Set(['id', 'source', 'target']);
     for (const [k, v] of Object.entries(edgeData)) {
         if (!skip.has(k) && typeof v === 'number') return { key: k, value: v };
@@ -195,46 +144,28 @@ const getEdgeValue = (edgeData) => {
     return null;
 };
 
-/**
- * Capture a DOM element with html2canvas at high resolution.
- * To capture the FULL scrollable content (not just the visible viewport),
- * we temporarily remove overflow constraints, measure the full scroll height,
- * capture, then restore everything.
- */
 const screenshotElement = async (el, filename, cy) => {
     if (!el || !window.html2canvas) return;
-
-    // Snapshot current styles
     const prev = {
         overflow:  el.style.overflow,
         maxHeight: el.style.maxHeight,
         height:    el.style.height,
         position:  el.style.position,
     };
-
-    // Expand the live element to show full scrollable content
     el.style.overflow  = 'visible';
     el.style.maxHeight = 'none';
     el.style.height    = 'auto';
-
-    // Two rAF ticks so the browser reflows and commits new dimensions
     await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
-
     const fullW = el.scrollWidth;
     const fullH = el.scrollHeight;
-
-    // If a Cytoscape instance is provided, resize + redraw its canvas
-    // so it fills the newly expanded container rather than showing blank.
     if (cy) {
         cy.resize();
         cy.fit(undefined, 20);
-        // Wait for Cytoscape to finish rendering its canvas
         await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
     }
-
     try {
         const canvas = await html2canvas(el, {
-            scale: 16,          // 16x → ~1536 DPI on 96-DPI screen
+            scale: 12,
             useCORS: true,
             backgroundColor: '#ffffff',
             logging: false,
@@ -247,13 +178,10 @@ const screenshotElement = async (el, filename, cy) => {
         });
         canvas.toBlob(blob => downloadBlob(blob, filename || 'screenshot.png'), 'image/png');
     } finally {
-        // Restore original styles
         el.style.overflow  = prev.overflow;
         el.style.maxHeight = prev.maxHeight;
         el.style.height    = prev.height;
         el.style.position  = prev.position;
-
-        // Resize Cytoscape back to its original container size
         if (cy) {
             await new Promise(r => requestAnimationFrame(r));
             cy.resize();
@@ -303,7 +231,7 @@ const CustomSelect = ({ options, selected, onSelect, placeholder = 'Select an op
     );
 };
 
-// ─── Node style factory (NO deprecated width/height:'label') ─────────────────
+// ─── Node style factory ───────────────────────────────────────────────────────
 const makeNodeStyle = (isPreview) => ({
     'background-color': '#2B6CB0',
     'label': 'data(id)',
@@ -313,7 +241,6 @@ const makeNodeStyle = (isPreview) => ({
     'font-size': isPreview ? '12px' : '11px',
     'font-weight': 'bold',
     'shape': 'round-rectangle',
-    // Explicit pixel dimensions instead of the deprecated string 'label'
     'width': 90,
     'height': 32,
     'text-max-width': '82px',
@@ -323,81 +250,44 @@ const makeNodeStyle = (isPreview) => ({
     'border-color': '#EBF8FF',
 });
 
-// ─── CytoscapeGraph component ─────────────────────────────────────────────────
+// ─── CytoscapeGraph ───────────────────────────────────────────────────────────
 const CytoscapeGraph = React.forwardRef(({ graphData, attributeMetadata, isPreview = false, centralNodeId = null }, ref) => {
     const domNodeRef = useRef(null);
     const cyRef = useRef(null);
     const [selectedNode, setSelectedNode] = useState(null);
     const [selectedEdge, setSelectedEdge] = useState(null);
-
-    // Keep a ref so cy event handlers always read the latest metadata
-    // without re-mounting the graph every time attributeMetadata changes.
     const attrMetaRef = useRef(attributeMetadata);
     useEffect(() => { attrMetaRef.current = attributeMetadata; }, [attributeMetadata]);
 
     useImperativeHandle(ref, () => ({
-        exportPNG: (scale) => {
-            if (cyRef.current) exportCyPNG(cyRef.current, 'graph', scale || 4);
-        },
-        // Named export: accepts a full filename base (no extension)
-        exportPNGNamed: (filenameBase, scale) => {
-            if (cyRef.current) exportCyPNG(cyRef.current, filenameBase, scale || 4);
-        },
-        // Expose raw cy instance so parent components (e.g. screenshot handler)
-        // can call cy.resize() / cy.fit() directly.
+        exportPNG: (scale) => { if (cyRef.current) exportCyPNG(cyRef.current, 'graph', scale || 4); },
+        exportPNGNamed: (filenameBase, scale) => { if (cyRef.current) exportCyPNG(cyRef.current, filenameBase, scale || 4); },
         getCy: () => cyRef.current,
     }));
 
     useEffect(() => {
         if (!domNodeRef.current || !graphData) return;
-
         const style = [
             { selector: 'node', style: makeNodeStyle(isPreview) },
-            { selector: 'edge', style: {
-                'width': 2,
-                'line-color': '#A0AEC0',
-                'target-arrow-shape': 'none',
-                'curve-style': 'bezier',
-            }},
-            { selector: 'node:selected', style: {
-                'background-color': '#F6E05E',
-                'border-color': '#D69E2E',
-                'color': '#000',
-            }},
-            { selector: 'edge:selected', style: {
-                'line-color': '#F6E05E',
-                'width': 4,
-            }},
+            { selector: 'edge', style: { 'width': 2, 'line-color': '#A0AEC0', 'target-arrow-shape': 'none', 'curve-style': 'bezier' }},
+            { selector: 'node:selected', style: { 'background-color': '#F6E05E', 'border-color': '#D69E2E', 'color': '#000' }},
+            { selector: 'edge:selected', style: { 'line-color': '#F6E05E', 'width': 4 }},
         ];
-
         if (centralNodeId) {
-            style.push({
-                selector: `node[id = "${centralNodeId}"]`,
-                style: { 'background-color': '#E53E3E', 'border-color': '#C53030', 'border-width': 3 },
-            });
+            style.push({ selector: `node[id = "${centralNodeId}"]`, style: { 'background-color': '#E53E3E', 'border-color': '#C53030', 'border-width': 3 }});
         }
-
         const cy = cytoscape({
             container: domNodeRef.current,
             elements: graphData,
             style,
             pixelRatio: isPreview ? 2 : 4,
-            // Don't run layout here — we run it manually below so we can
-            // call cy.fit() AFTER layout stops, by which point the container
-            // will have its final dimensions.
             layout: { name: 'preset' },
             userZoomingEnabled: !isPreview,
             userPanningEnabled: !isPreview,
         });
-
         cyRef.current = cy;
-
-        // Delay layout by two rAF ticks so the container has its final
-        // CSS dimensions before cose starts placing nodes. Without this,
-        // the layout sees a zero-height or wrongly-sized box and spreads
-        // nodes in a horizontal line.
         const runLayout = () => {
-            cy.resize(); // force cytoscape to re-read container size
+            cy.resize();
             const layout = cy.layout({
                 name: 'cose',
                 idealEdgeLength: 100,
@@ -418,10 +308,6 @@ const CytoscapeGraph = React.forwardRef(({ graphData, attributeMetadata, isPrevi
             });
             layout.on('layoutstop', () => {
                 cy.fit(undefined, isPreview ? 8 : 30);
-
-                // High-DPI / large-screen scaling for Paparazzi and similar tools.
-                // On screens wider than 4K (3840px), the graph should scale UP
-                // to fill the extra space rather than just fitting to the container height.
                 if (!isPreview && window.screen.width > 3840) {
                     const scaleFactor = window.screen.width / 3840;
                     cy.zoom(cy.zoom() * scaleFactor);
@@ -430,37 +316,24 @@ const CytoscapeGraph = React.forwardRef(({ graphData, attributeMetadata, isPrevi
             });
             layout.run();
         };
-        // Two rAF ticks: first lets the modal/container paint,
-        // second ensures the browser has committed the layout dimensions.
         requestAnimationFrame(() => requestAnimationFrame(runLayout));
-
         if (!isPreview) {
             cy.on('tap', 'node', evt => {
                 const nodeId = evt.target.id();
                 const desc = attrMetaRef.current[nodeId] || 'Description not available.';
-                console.log('[Graph] node tapped:', nodeId, '| description:', desc);
                 setSelectedEdge(null);
                 setSelectedNode({ id: nodeId, description: desc });
             });
             cy.on('tap', 'edge', evt => {
                 const d = evt.target.data();
-                console.log('[Graph] edge tapped:', d.source, '->', d.target, '| weight:', d.weight, '| full data:', d);
                 setSelectedNode(null);
                 setSelectedEdge({ ...d });
             });
-            cy.on('tap', evt => {
-                if (evt.target === cy) { setSelectedNode(null); setSelectedEdge(null); }
-            });
+            cy.on('tap', evt => { if (evt.target === cy) { setSelectedNode(null); setSelectedEdge(null); } });
         }
-
         const onResize = () => { cy.resize(); cy.fit(); };
         window.addEventListener('resize', onResize);
-        return () => {
-            window.removeEventListener('resize', onResize);
-            cy.destroy();
-            cyRef.current = null;
-        };
-    // attributeMetadata intentionally excluded — handled via attrMetaRef
+        return () => { window.removeEventListener('resize', onResize); cy.destroy(); cyRef.current = null; };
     }, [graphData, isPreview, centralNodeId]); // eslint-disable-line react-hooks/exhaustive-deps
 
     const edgeDisplay = selectedEdge ? getEdgeValue(selectedEdge) : null;
@@ -500,37 +373,24 @@ const CytoscapeGraph = React.forwardRef(({ graphData, attributeMetadata, isPrevi
 });
 
 // ─── Full-graph modal ─────────────────────────────────────────────────────────
-// selectedFile is passed in so the export filename reflects which JSON is loaded.
 const FullGraphModal = ({ onClose, graphData, attributeMetadata, selectedFile }) => {
     const graphRef = useRef(null);
-
-    // Build a clean filename base from the selected JSON filename:
-    //   "my_analysis_2024.json"  →  "full_graph_my_analysis_2024"
-    //   "results"                →  "full_graph_results"
     const exportFilenameBase = useMemo(() => {
-        const base = selectedFile
-            ? selectedFile.replace(/\.json$/i, '').replace(/[^a-zA-Z0-9_\-]/g, '_')
-            : 'graph';
+        const base = selectedFile ? selectedFile.replace(/\.json$/i, '').replace(/[^a-zA-Z0-9_\-]/g, '_') : 'graph';
         return `full_graph_${base}`;
     }, [selectedFile]);
 
     return (
         <div className="fixed inset-0 bg-black bg-opacity-60 flex items-center justify-center p-4 z-50" onClick={onClose}>
-            <div
-                className="bg-gray-100 dark:bg-gray-800 rounded-xl shadow-2xl p-4 w-full h-full max-w-7xl max-h-[95vh] flex flex-col"
-                onClick={e => e.stopPropagation()}
-            >
+            <div className="bg-gray-100 dark:bg-gray-800 rounded-xl shadow-2xl p-4 w-full h-full max-w-7xl max-h-[95vh] flex flex-col" onClick={e => e.stopPropagation()}>
                 <div className="flex justify-between items-center mb-2 flex-shrink-0">
                     <div>
                         <h2 className="text-2xl font-bold text-gray-800 dark:text-gray-100">Interactive Graph Visualization</h2>
                         <p className="text-sm text-gray-500 dark:text-gray-400">Click a node or edge to view details. Zoom and pan with mouse/trackpad.</p>
                     </div>
                     <div className="flex space-x-2 items-center">
-                        <button
-                            onClick={() => graphRef.current?.exportPNGNamed(exportFilenameBase, 4)}
-                            className="screenshot-btn px-3 py-1 text-sm text-white bg-blue-600 rounded-lg hover:bg-blue-700 whitespace-nowrap"
-                            title="Export graph canvas as high-res PNG (auto-scaled to fit browser limits)"
-                        >
+                        <button onClick={() => graphRef.current?.exportPNGNamed(exportFilenameBase, 4)}
+                            className="screenshot-btn px-3 py-1 text-sm text-white bg-blue-600 rounded-lg hover:bg-blue-700 whitespace-nowrap">
                             Export PNG
                         </button>
                         <button onClick={onClose} className="text-gray-400 hover:text-gray-800 dark:hover:text-gray-200 text-3xl ml-2">&times;</button>
@@ -544,21 +404,18 @@ const FullGraphModal = ({ onClose, graphData, attributeMetadata, selectedFile })
     );
 };
 
-// ─── Subgraph detail modal (clique / claw) — with screenshot button ───────────
+// ─── Subgraph modal ───────────────────────────────────────────────────────────
 const SubgraphModal = ({ analysis, attributeMetadata, edgeWeightMap, typeMap, onClose }) => {
     const modalRef = useRef(null);
     const cyRef = useRef(null);
     const [screenshotting, setScreenshotting] = useState(false);
 
-    // Enrich subgraph edges with weight from the full graph lookup map
     const enrichedGraphData = useMemo(() => {
         if (!analysis.cytoscape_data) return analysis.cytoscape_data;
         const enrichedEdges = (analysis.cytoscape_data.edges ?? []).map(e => {
             const d = e.data ?? e;
             const key = d.source + '||' + d.target;
-            const weight = (edgeWeightMap && edgeWeightMap[key] !== undefined)
-                ? edgeWeightMap[key]
-                : d.weight;
+            const weight = (edgeWeightMap && edgeWeightMap[key] !== undefined) ? edgeWeightMap[key] : d.weight;
             return { data: { ...d, weight } };
         });
         return { ...analysis.cytoscape_data, edges: enrichedEdges };
@@ -569,14 +426,8 @@ const SubgraphModal = ({ analysis, attributeMetadata, edgeWeightMap, typeMap, on
         setScreenshotting(true);
         document.body.classList.add('capturing');
         try {
-            // Pass the live cy instance so screenshotElement can resize+redraw
-            // the Cytoscape canvas after the modal is expanded for capture.
             const cy = cyRef.current ? cyRef.current.getCy() : null;
-            await screenshotElement(
-                modalRef.current,
-                `${analysis.subgraph_type}_${analysis.nodes_data.join('-')}.png`,
-                cy
-            );
+            await screenshotElement(modalRef.current, `${analysis.subgraph_type}_${analysis.nodes_data.join('-')}.png`, cy);
         } finally {
             document.body.classList.remove('capturing');
             setScreenshotting(false);
@@ -585,37 +436,25 @@ const SubgraphModal = ({ analysis, attributeMetadata, edgeWeightMap, typeMap, on
 
     return (
         <div className="fixed inset-0 bg-black bg-opacity-60 flex items-center justify-center p-4 z-50" onClick={onClose}>
-            <div
-                ref={modalRef}
+            <div ref={modalRef}
                 className="bg-white dark:bg-gray-800 rounded-xl shadow-2xl p-6 w-full max-w-3xl relative my-8 max-h-[90vh] overflow-y-auto modal-content"
-                onClick={e => e.stopPropagation()}
-            >
-                {/* Header */}
+                onClick={e => e.stopPropagation()}>
                 <div className="flex justify-between items-start mb-4">
                     <h2 className="text-2xl font-bold text-gray-800 dark:text-gray-100 capitalize pr-4">
-                        {typeMap[analysis.subgraph_type] || analysis.subgraph_type}: {analysis.nodes_data.join(', ')}
+                        {analysis.subgraph_type === 'clique' ? `${analysis.nodes_data.length}-Ptych` : (typeMap[analysis.subgraph_type] || analysis.subgraph_type)}: {analysis.nodes_data.join(', ')}
                     </h2>
                     <div className="flex items-center space-x-2 flex-shrink-0">
-                        <button
-                            onClick={() => cyRef.current?.exportPNG(4)}
-                            className="screenshot-btn px-3 py-1 text-xs text-white bg-blue-600 rounded-lg hover:bg-blue-700 whitespace-nowrap"
-                            title="Export only the graph canvas as high-res PNG"
-                        >
+                        <button onClick={() => cyRef.current?.exportPNG(4)}
+                            className="screenshot-btn px-3 py-1 text-xs text-white bg-blue-600 rounded-lg hover:bg-blue-700 whitespace-nowrap">
                             Graph PNG
                         </button>
-                        <button
-                            onClick={handleScreenshot}
-                            disabled={screenshotting}
-                            className="screenshot-btn px-3 py-1 text-xs text-white bg-purple-600 rounded-lg hover:bg-purple-700 disabled:opacity-60 whitespace-nowrap"
-                            title="Screenshot this entire modal panel at ~300 DPI"
-                        >
+                        <button onClick={handleScreenshot} disabled={screenshotting}
+                            className="screenshot-btn px-3 py-1 text-xs text-white bg-purple-600 rounded-lg hover:bg-purple-700 disabled:opacity-60 whitespace-nowrap">
                             {screenshotting ? 'Capturing…' : 'Screenshot'}
                         </button>
                         <button onClick={onClose} className="text-gray-400 hover:text-gray-800 dark:hover:text-gray-200 text-3xl leading-none">&times;</button>
                     </div>
                 </div>
-
-                {/* Body */}
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-6 items-stretch">
                     <div className="bg-gray-50 dark:bg-gray-900 p-4 rounded-lg">
                         <h3 className="text-xl font-semibold text-gray-700 dark:text-gray-200 mb-3">Attributes and Descriptions</h3>
@@ -629,22 +468,16 @@ const SubgraphModal = ({ analysis, attributeMetadata, edgeWeightMap, typeMap, on
                         </ul>
                     </div>
                     <div className="bg-gray-50 dark:bg-gray-900 p-2 rounded-lg flex items-center justify-center min-h-[200px]">
-                        <CytoscapeGraph
-                            ref={cyRef}
-                            graphData={enrichedGraphData}
-                            attributeMetadata={attributeMetadata}
-                            centralNodeId={analysis.subgraph_type === 'claw' ? analysis.nodes_data[0] : null}
-                        />
+                        <CytoscapeGraph ref={cyRef} graphData={enrichedGraphData} attributeMetadata={attributeMetadata}
+                            centralNodeId={analysis.subgraph_type === 'claw' ? analysis.nodes_data[0] : null} />
                     </div>
                 </div>
-
                 <div className="mt-6">
                     <h3 className="text-xl font-semibold text-gray-700 dark:text-gray-200 mb-3">Final LLM Analysis</h3>
                     <p className="text-gray-700 dark:text-gray-300 leading-relaxed bg-blue-50 dark:bg-blue-900/20 p-4 rounded-lg border-l-4 border-blue-500">
                         {analysis.synthesized_analysis}
                     </p>
                 </div>
-
                 {analysis.original_responses && analysis.original_responses.length > 0 && (
                     <div className="mt-4">
                         <h4 className="text-lg font-semibold text-gray-700 dark:text-gray-300 mb-2">Original AI Responses</h4>
@@ -676,245 +509,33 @@ const App = () => {
     const [error, setError] = useState(null);
     const [isDarkMode, setIsDarkMode] = useState(() => window.matchMedia('(prefers-color-scheme: dark)').matches);
     const [screenshottingPage, setScreenshottingPage] = useState(false);
-
-    const handlePageScreenshot = async () => {
-        const el = document.getElementById('scale-root');
-        if (!el || !window.html2canvas) return;
-
-        const CAPTURE_W = 1440;
-        const CAPTURE_H = 1350;
-        const CAPTURE_SCALE = 10;
-        const isDark = document.documentElement.classList.contains('dark');
-        const bgColor = isDark ? '#111827' : '#f3f4f6';
-
-        console.log('[PageScreenshot] START — target:', CAPTURE_W, 'x', CAPTURE_H,
-            'scale:', CAPTURE_SCALE, 'dark:', isDark);
-
-        setScreenshottingPage(true);
-        document.body.classList.add('capturing');
-        await new Promise(r => setTimeout(r, 60));
-
-        // Stash
-        const prevScroll    = window.scrollY;
-
-        // Snapshot every style we touch so finally can restore them exactly.
-        const prevEl = {
-            transform: el.style.transform,
-            overflow:  el.style.overflow,
-            position:  el.style.position,
-            top:       el.style.top,
-            left:      el.style.left,
-            width:     el.style.width,
-            maxHeight: el.style.maxHeight,
-            margin:    el.style.margin,
-        };
-        const prevBody = {
-            width:      document.body.style.width,
-            height:     document.body.style.height,
-            overflow:   document.body.style.overflow,
-            background: document.body.style.background,
-            margin:     document.body.style.margin,
-            padding:    document.body.style.padding,
-        };
-        const prevHtml = {
-            overflow: document.documentElement.style.overflow,
-            margin:   document.documentElement.style.margin,
-            padding:  document.documentElement.style.padding,
-        };
-
-        try {
-            // Force body to exact capture size BEFORE scrolling
-            // so scrollTo(0,0) actually works (can't scroll if content fits)
-            document.body.style.width    = CAPTURE_W + 'px';
-            document.body.style.height   = CAPTURE_H + 'px';
-            document.body.style.overflow = 'hidden';
-            document.body.style.background = bgColor;
-            document.body.style.margin   = '0';
-            document.body.style.padding  = '0';
-            document.documentElement.style.overflow = 'hidden';
-            document.documentElement.style.margin   = '0';
-            document.documentElement.style.padding  = '0';
-
-            // Force el to top-left, no transform
-            el.style.position  = 'absolute';
-            el.style.top       = '0';
-            el.style.left      = '0';
-            el.style.transform = 'none';
-            el.style.width     = CAPTURE_W + 'px';
-            el.style.maxHeight = CAPTURE_H + 'px';
-            el.style.overflow  = 'hidden';
-            el.style.margin    = '0';
-
-            // Now scroll — body is already clipped so this will actually reach 0
-            window.scrollTo(0, 0);
-            document.documentElement.scrollTop  = 0;
-            document.documentElement.scrollLeft = 0;
-            document.body.scrollTop  = 0;
-            document.body.scrollLeft = 0;
-
-            // Wait for reflow
-            await new Promise(r => setTimeout(r, 50));
-            await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
-
-            const actualScrollY = window.scrollY;
-            console.log('[PageScreenshot] prepped — scrollY:', actualScrollY,
-                '| el.offsetH:', el.offsetHeight,
-                '| body.offsetW:', document.body.offsetWidth,
-                '| body.offsetH:', document.body.offsetHeight);
-
-            // Capture at scale:1 to avoid html2canvas text baseline bug where
-            // text is offset by scale * (lineHeight - fontSize) / 2 at high scales.
-            // We then manually scale the canvas up to the desired output size.
-            const outputCanvas = await html2canvas(document.body, {
-                scale:           1,
-                useCORS:         true,
-                backgroundColor: bgColor,
-                logging:         false,
-                width:           CAPTURE_W,
-                height:          CAPTURE_H,
-                windowWidth:     CAPTURE_W,
-                windowHeight:    CAPTURE_H,
-                scrollX:         -window.scrollX,
-                scrollY:         -window.scrollY,
-                x:               0,
-                y:               0,
-                onclone: (clonedDoc) => {
-                    if (isDark) clonedDoc.documentElement.classList.add('dark');
-
-                    const htmlEl = clonedDoc.documentElement;
-                    const bodyEl = clonedDoc.body;
-
-                    htmlEl.scrollTop  = 0;
-                    htmlEl.scrollLeft = 0;
-                    htmlEl.style.margin   = '0';
-                    htmlEl.style.padding  = '0';
-                    htmlEl.style.overflow = 'hidden';
-
-                    bodyEl.scrollTop  = 0;
-                    bodyEl.scrollLeft = 0;
-                    bodyEl.style.width    = CAPTURE_W + 'px';
-                    bodyEl.style.height   = CAPTURE_H + 'px';
-                    bodyEl.style.overflow = 'hidden';
-                    bodyEl.style.margin   = '0';
-                    bodyEl.style.padding  = '0';
-                    bodyEl.style.top      = '0';
-                    bodyEl.style.left     = '0';
-
-                    const clonedEl = clonedDoc.getElementById('scale-root');
-                    if (clonedEl) {
-                        clonedEl.style.position  = 'absolute';
-                        clonedEl.style.top       = '0';
-                        clonedEl.style.left      = '0';
-                        clonedEl.style.transform = 'none';
-                        clonedEl.style.width     = CAPTURE_W + 'px';
-                        clonedEl.style.maxHeight = CAPTURE_H + 'px';
-                        clonedEl.style.overflow  = 'hidden';
-                        clonedEl.style.margin    = '0';
-                    }
-
-                    // Tailwind preflight sets img{display:block} which causes
-                    // html2canvas to miscompute text baselines for all elements.
-                    // Fix: reset img to inline-block in the clone.
-                    let fixCount = 0;
-                    clonedDoc.querySelectorAll('img').forEach(img => {
-                        img.style.display = 'inline-block';
-                        fixCount++;
-                    });
-                    console.log('[onclone] img display fixed on', fixCount, 'images');
-
-                    // Boost Cytoscape pixelRatio to 4 for crisp canvas output
-                    const liveCanvases  = Array.from(el.querySelectorAll('canvas'));
-                    const cloneCanvases = Array.from(clonedDoc.querySelectorAll('canvas'));
-                    console.log('[PageScreenshot] onclone canvases — live:', liveCanvases.length,
-                        '| clone:', cloneCanvases.length);
-                    liveCanvases.forEach((src, i) => {
-                        const dst = cloneCanvases[i];
-                        if (!dst) return;
-                        // Scale up canvas 4x for high-res Cytoscape output
-                        const scale = 4;
-                        dst.width  = src.width  * scale;
-                        dst.height = src.height * scale;
-                        const ctx = dst.getContext('2d');
-                        ctx.scale(scale, scale);
-                        ctx.drawImage(src, 0, 0);
-                        // Reset canvas CSS size so layout isn't affected
-                        dst.style.width  = (src.width  / window.devicePixelRatio) + 'px';
-                        dst.style.height = (src.height / window.devicePixelRatio) + 'px';
-
-                    });
-                },
-            });
-
-            console.log('[PageScreenshot] raw canvas:', outputCanvas.width, 'x', outputCanvas.height);
-
-            const outW = CAPTURE_W * CAPTURE_SCALE;
-            const outH = CAPTURE_H * CAPTURE_SCALE;
-
-            // Scale up the 1x canvas to CAPTURE_SCALE x output size
-            const cropped = document.createElement('canvas');
-            cropped.width  = outW;
-            cropped.height = outH;
-            const ctx = cropped.getContext('2d');
-            ctx.imageSmoothingEnabled = true;
-            ctx.imageSmoothingQuality = 'high';
-            ctx.fillStyle = bgColor;
-            ctx.fillRect(0, 0, outW, outH);
-            ctx.drawImage(outputCanvas, 0, 0, CAPTURE_W, CAPTURE_H, 0, 0, outW, outH);
-            console.log('[PageScreenshot] scaled from', outputCanvas.width, 'x', outputCanvas.height,
-                'to', outW, 'x', outH);
-
-            // Diagnostic: sample a 1px-wide column at x=200 on the raw 1x canvas
-            // to find the first non-background pixel row — tells us actual text y-start
-            {
-                const dc = document.createElement('canvas');
-                dc.width = 1; dc.height = CAPTURE_H;
-                const dx = dc.getContext('2d');
-                dx.drawImage(outputCanvas, 200, 0, 1, CAPTURE_H, 0, 0, 1, CAPTURE_H);
-                const px = dx.getImageData(0, 0, 1, CAPTURE_H).data;
-                // background color in dark mode is approx rgb(17,24,39)
-                for (let y = 0; y < CAPTURE_H; y++) {
-                    const r=px[y*4], g=px[y*4+1], b=px[y*4+2];
-                    if (Math.abs(r-17)>10 || Math.abs(g-24)>10 || Math.abs(b-39)>10) {
-                        console.log('[diag] first non-bg pixel at x=200, y='+y, 'rgb('+r+','+g+','+b+')');
-                        break;
-                    }
-                }
-            }
-            cropped.toBlob(blob => {
-                console.log('[PageScreenshot] done — blob:', blob.size, 'bytes');
-                downloadBlob(blob, 'page_screenshot.png');
-            }, 'image/png');
-
-        } finally {
-            // Restore every property on every element we touched.
-            el.style.transform = prevEl.transform;
-            el.style.overflow  = prevEl.overflow;
-            el.style.position  = prevEl.position;
-            el.style.top       = prevEl.top;
-            el.style.left      = prevEl.left;
-            el.style.width     = prevEl.width;
-            el.style.maxHeight = prevEl.maxHeight;
-            el.style.margin    = prevEl.margin;
-            document.body.style.width      = prevBody.width;
-            document.body.style.height     = prevBody.height;
-            document.body.style.overflow   = prevBody.overflow;
-            document.body.style.background = prevBody.background;
-            document.body.style.margin     = prevBody.margin;
-            document.body.style.padding    = prevBody.padding;
-            document.documentElement.style.overflow = prevHtml.overflow;
-            document.documentElement.style.margin   = prevHtml.margin;
-            document.documentElement.style.padding  = prevHtml.padding;
-            window.scrollTo(0, prevScroll);
-            console.log('[PageScreenshot] restored');
-            document.body.classList.remove('capturing');
-            setScreenshottingPage(false);
-        }
-    };
     const [showFullGraph, setShowFullGraph] = useState(false);
     const [isAttributeFilterOpen, setIsAttributeFilterOpen] = useState(false);
     const [hideInactiveFilters, setHideInactiveFilters] = useState(false);
 
-    const typeMap = { clique: 'Clique', claw: 'Hotspot' };
+    const handlePageScreenshot = async () => {
+        setScreenshottingPage(true);
+        document.body.classList.add('capturing');
+        try {
+            const res = await fetch('http://127.0.0.1:5000/api/screenshot', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ width: 1440, height: 1350, scale: 10 })
+            });
+            if (!res.ok) {
+                const err = await res.json();
+                alert('Screenshot failed: ' + err.error);
+                return;
+            }
+            const blob = await res.blob();
+            downloadBlob(blob, 'page_screenshot.png');
+        } finally {
+            document.body.classList.remove('capturing');
+            setScreenshottingPage(false);
+        }
+    };
+
+    const typeMap = { clique: 'n-Ptych', claw: 'Hotspot' };
     const structureFilterDefs = [
         { name: 'claw',     label: typeMap.claw },
         { name: 'clique_3', label: `3-node ${typeMap.clique}` },
@@ -928,12 +549,25 @@ const App = () => {
         (async () => {
             try {
                 setLoading(true);
-                const res = await fetch('http://127.0.0.1:5000/api/analyses');
-                if (!res.ok) throw new Error('Failed to load list of analyses.');
-                const files = await res.json();
+                const [filesRes, stateRes] = await Promise.all([
+                    fetch('http://127.0.0.1:5000/api/analyses'),
+                    fetch('http://127.0.0.1:5000/api/state')
+                ]);
+                const files = await filesRes.json();
+                const state = await stateRes.json();
                 setAnalysisFiles(files);
-                if (files.length > 0) setSelectedFile(files[0]);
-                else setLoading(false);
+
+                const params = new URLSearchParams(window.location.search);
+                const fileParam = params.get('file');
+                if (fileParam && files.includes(fileParam)) {
+                    setSelectedFile(fileParam);
+                } else if (state.selected_file && files.includes(state.selected_file)) {
+                    setSelectedFile(state.selected_file);
+                } else if (files.length > 0) {
+                    setSelectedFile(files[0]);
+                } else {
+                    setLoading(false);
+                }
             } catch (err) {
                 setError(`Cannot load analysis list. Is the server running? Error: ${err.message}`);
                 setLoading(false);
@@ -966,9 +600,8 @@ const App = () => {
         })();
     }, [selectedFile]);
 
-    const analyses = currentAnalysisData?.analyses ?? [];
+    const analyses = useMemo(() => currentAnalysisData?.analyses ?? [], [currentAnalysisData]);
 
-    // Memoize so the object reference is stable — prevents useless child re-renders
     const attributeMetadata = useMemo(
         () => currentAnalysisData?.metadata?.attribute_descriptions ?? {},
         [currentAnalysisData]
@@ -976,8 +609,6 @@ const App = () => {
 
     const graphDataForCytoscape = currentAnalysisData?.full_graph_cytoscape_data ?? { nodes: [], edges: [] };
 
-    // Build a weight lookup: "source||target" -> weight, from full graph edges.
-    // Used to enrich per-subgraph edges which don't carry weight themselves.
     const edgeWeightMap = useMemo(() => {
         const map = {};
         const edges = currentAnalysisData?.full_graph_cytoscape_data?.edges ?? [];
@@ -985,7 +616,7 @@ const App = () => {
             const d = e.data ?? e;
             if (d.source && d.target && d.weight !== undefined) {
                 map[d.source + '||' + d.target] = d.weight;
-                map[d.target + '||' + d.source] = d.weight; // undirected
+                map[d.target + '||' + d.source] = d.weight;
             }
         });
         return map;
@@ -1021,8 +652,6 @@ const App = () => {
         });
     }, [analyses, filters, attributeMetadata]);
 
-    // FIX for infinite re-render: depend only on filteredAnalyses (stable array ref),
-    // NOT on attributeMetadata (which previously changed every render in older code).
     useEffect(() => {
         const newCounts = {};
         Object.keys(attributeMetadata).forEach(attr => { newCounts[attr] = 0; });
@@ -1032,16 +661,11 @@ const App = () => {
             });
         });
         setCounts(newCounts);
-    }, [filteredAnalyses]); // attributeMetadata keys are stable after load; no need to add it here
+    }, [filteredAnalyses]);
 
     const handleFilterChange = useCallback(e => {
         const { name, checked } = e.target;
-        console.log('[Filter] changed:', name, '=', checked);
-        setFilters(prev => {
-            const next = { ...prev, [name]: checked };
-            console.log('[Filter] new filter state:', next);
-            return next;
-        });
+        setFilters(prev => ({ ...prev, [name]: checked }));
     }, []);
 
     const alpha_norm_value = currentAnalysisData?.metadata?.alpha_normalized;
@@ -1049,16 +673,24 @@ const App = () => {
 
     return (
         <div className="min-h-screen bg-gray-100 dark:bg-gray-900 p-4 sm:p-6 font-sans flex flex-col items-center transition-colors">
+
+            {SHOW_DEBUG_FILTERS && (
+                <div style={{width:'100%', maxWidth:'900px', marginBottom:'16px', fontFamily:'monospace'}}>
+                    <div style={{background:'red', color:'white', padding:'8px', lineHeight:'1', fontSize:'16px'}}>lineHeight:1</div>
+                    <div style={{background:'blue', color:'white', padding:'8px', lineHeight:'1.5', fontSize:'16px'}}>lineHeight:1.5</div>
+                    <div style={{background:'green', color:'white', padding:'8px', lineHeight:'normal', fontSize:'16px'}}>lineHeight:normal</div>
+                    <div style={{background:'purple', color:'white', padding:'8px', fontSize:'16px', display:'flex', alignItems:'center', height:'40px'}}>flexbox alignItems:center</div>
+                    <div style={{background:'orange', color:'black', padding:'8px', fontSize:'16px', verticalAlign:'middle', display:'table-cell', height:'40px'}}>table-cell verticalAlign:middle</div>
+                </div>
+            )}
+
             <header className="w-full max-w-6xl text-center mb-6 relative">
                 <h1 className="text-4xl font-bold text-gray-800 dark:text-gray-100 mb-2">Interactive Graph Analyzer</h1>
                 <p className="text-lg text-gray-600 dark:text-gray-400">Explore attribute correlations analyzed by a local LLM.</p>
                 <div className="absolute top-0 right-0 flex items-center space-x-1">
-                    <button
-                        onClick={handlePageScreenshot}
-                        disabled={screenshottingPage}
+                    <button onClick={handlePageScreenshot} disabled={screenshottingPage}
                         title="Screenshot entire page at high resolution"
-                        className="screenshot-btn p-2 rounded-full text-gray-500 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-700 disabled:opacity-50"
-                    >
+                        className="screenshot-btn p-2 rounded-full text-gray-500 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-700 disabled:opacity-50">
                         {screenshottingPage
                             ? <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6 animate-spin" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg>
                             : <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 13a3 3 0 11-6 0 3 3 0 016 0z" /></svg>
@@ -1078,16 +710,28 @@ const App = () => {
             <div className="w-full max-w-6xl bg-white dark:bg-gray-800 rounded-xl shadow-lg p-6 mb-8">
                 <div className="flex justify-between items-center mb-2">
                     <label className="block text-lg font-semibold text-gray-700 dark:text-gray-200">Select Analysis Result</label>
-                    {alpha_norm_value !== undefined && (
+                    {alpha_norm_value != null && (
                         <span className="text-sm font-medium bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-300 px-2.5 py-0.5 rounded-full">
                             Alpha: {alpha_norm_value.toFixed(2)}
-                            {threshold_value !== undefined && ` | Threshold: ${threshold_value.toFixed(4)}`}
+                            {threshold_value != null && ` | Threshold: ${threshold_value.toFixed(4)}`}
                         </span>
                     )}
                 </div>
                 <div className="flex flex-col sm:flex-row space-y-2 sm:space-y-0 sm:space-x-4">
-                    <CustomSelect options={analysisFiles} selected={selectedFile} onSelect={setSelectedFile} placeholder="Loading analyses..." />
-                    <button onClick={() => { console.log('[Modal] opening full graph modal'); setShowFullGraph(true); }} disabled={loading || !currentAnalysisData}
+                    <CustomSelect
+                        options={analysisFiles}
+                        selected={selectedFile}
+                        onSelect={(file) => {
+                            setSelectedFile(file);
+                            fetch('http://127.0.0.1:5000/api/state', {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ selected_file: file })
+                            });
+                        }}
+                        placeholder="Loading analyses..."
+                    />
+                    <button onClick={() => setShowFullGraph(true)} disabled={loading || !currentAnalysisData}
                         className="px-5 py-2 text-white bg-indigo-600 rounded-lg hover:bg-indigo-700 disabled:bg-indigo-300 disabled:cursor-not-allowed whitespace-nowrap">
                         Show Interactive Graph
                     </button>
@@ -1103,8 +747,7 @@ const App = () => {
 
             {currentAnalysisData && !loading && (
                 <>
-                    {/* Structure filters */}
-                    <div className="w-full max-w-6xl bg-white dark:bg-gray-800 rounded-xl shadow-lg p-6 mb-8 transition-colors">
+                    {SHOW_FILTERS && <div className="w-full max-w-6xl bg-white dark:bg-gray-800 rounded-xl shadow-lg p-6 mb-8 transition-colors">
                         <h2 className="text-2xl font-semibold text-gray-700 dark:text-gray-200 mb-4">Filter by Structure</h2>
                         <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-4">
                             {structureFilterDefs
@@ -1125,10 +768,9 @@ const App = () => {
                                 <span className="ml-2 text-gray-800 dark:text-gray-100 text-sm font-medium">Only 'No' Answers</span>
                             </label>
                         </div>
-                    </div>
+                    </div>}
 
-                    {/* Attribute filters */}
-                    <div className="w-full max-w-6xl bg-white dark:bg-gray-800 rounded-xl shadow-lg p-6 mb-8 transition-colors">
+                    {SHOW_FILTERS && <div className="w-full max-w-6xl bg-white dark:bg-gray-800 rounded-xl shadow-lg p-6 mb-8 transition-colors">
                         <div className="flex justify-between items-center">
                             <div className="flex items-center space-x-3 cursor-pointer" onClick={() => setIsAttributeFilterOpen(v => !v)}>
                                 <h2 className="text-2xl font-semibold text-gray-700 dark:text-gray-200">Filter by Attribute</h2>
@@ -1159,30 +801,25 @@ const App = () => {
                                     })}
                             </div>
                         </div>
-                    </div>
+                    </div>}
 
-                    {/* Card grid */}
                     <main className="w-full max-w-6xl">
                         <p className="text-center mb-6 text-gray-600 dark:text-gray-400">
                             Showing <span className="font-bold text-indigo-500">{filteredAnalyses.length}</span> of <span className="font-bold">{analyses.length}</span> total subgraphs.
                         </p>
                         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
                             {filteredAnalyses.length > 0 ? filteredAnalyses.map((analysis, index) => (
-                                <div key={index} onClick={() => { console.log('[Modal] opening subgraph:', analysis.subgraph_type, analysis.nodes_data); setSelectedSubgraph(analysis); }}
+                                <div key={index} onClick={() => setSelectedSubgraph(analysis)}
                                     className="bg-white dark:bg-gray-800 rounded-lg shadow-md hover:shadow-xl hover:-translate-y-1 transition-all duration-300 cursor-pointer flex flex-col">
                                     <div className="p-5 flex-shrink-0">
                                         <h3 className="text-xl font-bold text-gray-800 dark:text-gray-100 mb-2 capitalize">
-                                            {typeMap[analysis.subgraph_type] || analysis.subgraph_type}: {analysis.nodes_data.join(', ')}
+                                            {analysis.subgraph_type === 'clique' ? `${analysis.nodes_data.length}-Ptych` : (typeMap[analysis.subgraph_type] || analysis.subgraph_type)}: {analysis.nodes_data.join(', ')}
                                         </h3>
                                         <p className="text-gray-600 dark:text-gray-400 text-sm h-20 line-clamp-3">{analysis.synthesized_analysis}</p>
                                     </div>
                                     <div className="flex-grow mt-auto h-36 bg-gray-50 dark:bg-gray-700 p-2">
-                                        <CytoscapeGraph
-                                            graphData={analysis.cytoscape_data}
-                                            attributeMetadata={attributeMetadata}
-                                            isPreview={true}
-                                            centralNodeId={analysis.subgraph_type === 'claw' ? analysis.nodes_data[0] : null}
-                                        />
+                                        <CytoscapeGraph graphData={analysis.cytoscape_data} attributeMetadata={attributeMetadata}
+                                            isPreview={true} centralNodeId={analysis.subgraph_type === 'claw' ? analysis.nodes_data[0] : null} />
                                     </div>
                                 </div>
                             )) : (
@@ -1197,24 +834,15 @@ const App = () => {
 
             {showFullGraph && (
                 <Portal>
-                    <FullGraphModal
-                        onClose={() => { console.log('[Modal] closing full graph modal'); setShowFullGraph(false); }}
-                        graphData={graphDataForCytoscape}
-                        attributeMetadata={attributeMetadata}
-                        selectedFile={selectedFile}
-                    />
+                    <FullGraphModal onClose={() => setShowFullGraph(false)}
+                        graphData={graphDataForCytoscape} attributeMetadata={attributeMetadata} selectedFile={selectedFile} />
                 </Portal>
             )}
 
             {selectedSubgraph && (
                 <Portal>
-                    <SubgraphModal
-                        analysis={selectedSubgraph}
-                        attributeMetadata={attributeMetadata}
-                        edgeWeightMap={edgeWeightMap}
-                        typeMap={typeMap}
-                        onClose={() => { console.log('[Modal] closing subgraph modal'); setSelectedSubgraph(null); }}
-                    />
+                    <SubgraphModal analysis={selectedSubgraph} attributeMetadata={attributeMetadata}
+                        edgeWeightMap={edgeWeightMap} typeMap={typeMap} onClose={() => setSelectedSubgraph(null)} />
                 </Portal>
             )}
         </div>
